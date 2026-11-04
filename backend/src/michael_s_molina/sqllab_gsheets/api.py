@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 from flask import current_app, g, request, Response
@@ -18,7 +18,7 @@ from superset_core.rest_api.decorators import api
 
 from .cells import dataframe_rows
 from .config import sync_max_rows
-from .errors import ExportRejected
+from .errors import ExportRejected, GENERIC_FAILURE, INVALID_REQUEST
 from .google_sheets import (
     check_cell_limit,
     create_spreadsheet,
@@ -28,8 +28,6 @@ from .google_sheets import (
 
 logger = logging.getLogger(__name__)
 
-GENERIC_FAILURE = "Couldn't create the Google Sheet. Try again later."
-INVALID_REQUEST = "Invalid export request."
 SQL_ACCESS_DENIED = "You don't have access to run this query."
 
 
@@ -61,7 +59,8 @@ def check_sql_access(
     schema: str | None,
 ) -> None:
     """Refuse SQL the user couldn't run in SQL Lab itself."""
-    sm = current_app.appbuilder.sm
+    # FAB attaches appbuilder to the app at runtime; Flask's types don't declare it.
+    sm = cast(Any, current_app).appbuilder.sm
     if not sm.can_access("can_execute_sql_query", "SQLLab"):
         raise ExportRejected(403, SQL_ACCESS_DENIED)
     if not database.expose_in_sqllab:

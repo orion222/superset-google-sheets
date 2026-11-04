@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8", "flask>=2.3"]
+test = ["pytest>=8", "flask>=2.3", "mypy>=1.10", "pandas-stubs"]
 
 [tool.apache_superset_extensions.build]
 include = [

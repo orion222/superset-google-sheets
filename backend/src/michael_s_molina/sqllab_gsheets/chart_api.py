@@ -18,7 +18,7 @@ from superset_core.rest_api.decorators import api
 
 from .cells import query_rows, temporal_columns
 from .config import sync_max_rows
-from .errors import ExportRejected
+from .errors import ExportRejected, GENERIC_FAILURE, INVALID_REQUEST
 from .google_sheets import (
     check_cell_limit,
     create_spreadsheet,
@@ -30,12 +30,11 @@ logger = logging.getLogger(__name__)
 
 TAB_NAME_MAX_LEN = 100
 UNTITLED = "Untitled chart"
-GENERIC_FAILURE = "Couldn't create the Google Sheet. Try again later."
-INVALID_REQUEST = "Invalid export request."
 
 
 def capabilities(email: str | None) -> dict[str, bool]:
-    return {"can_export": can_export_data() and bool(email)}
+    # The host disables the items for users who can't download, so they stay visible.
+    return {"can_export": bool(email)}
 
 
 def _run(payload: dict[str, Any]) -> list[Any]:
@@ -131,7 +130,7 @@ class ChartExportAPI(RestApi):
             chartName: Name used for the spreadsheet title and tabs
         """
         try:
-            body = request.json
+            body = request.get_json(silent=True)
             if not isinstance(body, dict):
                 raise ExportRejected(400, INVALID_REQUEST)
             url = export_chart(

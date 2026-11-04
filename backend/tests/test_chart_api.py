@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import patch
+import inspect
+from unittest.mock import MagicMock, patch
 
 import pytest
 from superset_core.exports.types import ChartQueryResult, GenericDataType
 
-from michael_s_molina.sqllab_gsheets.chart_api import capabilities, export_chart
+from michael_s_molina.sqllab_gsheets.chart_api import (
+    capabilities,
+    ChartExportAPI,
+    export_chart,
+)
 from michael_s_molina.sqllab_gsheets.errors import ExportRejected
 from michael_s_molina.sqllab_gsheets.google_sheets import GoogleExportError
 
@@ -134,12 +139,32 @@ def test_too_many_cells_is_400_before_any_google_call(app, m):
     m.create_spreadsheet.assert_not_called()
 
 
-def test_capabilities_reflects_export_permission(app, m):
+def test_capabilities_requires_only_an_email(app, m):
     m.can_export_data.return_value = False
-    assert capabilities(email="u@x.com") == {"can_export": False}
-    m.can_export_data.return_value = True
-    assert capabilities(email=None) == {"can_export": False}
     assert capabilities(email="u@x.com") == {"can_export": True}
+    assert capabilities(email=None) == {"can_export": False}
+    assert capabilities(email="") == {"can_export": False}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"data": "{not json", "content_type": "application/json"},
+        {"data": "payload=x", "content_type": "application/x-www-form-urlencoded"},
+        {"json": [1]},
+    ],
+)
+def test_endpoint_malformed_body_is_400(app, kwargs):
+    api = ChartExportAPI()
+    api.response = lambda status, **kw: (status, kw)
+    endpoint = inspect.unwrap(ChartExportAPI.export_to_sheets)
+    with (
+        app.test_request_context(method="POST", **kwargs),
+        patch(f"{MODULE}.g", MagicMock(user=MagicMock(email="u@x.com"))),
+        patch(f"{MODULE}.export_chart") as export,
+    ):
+        assert endpoint(api) == (400, {"message": "Invalid export request."})
+    export.assert_not_called()
 
 
 def test_google_failure_is_generic_500(app, m):
