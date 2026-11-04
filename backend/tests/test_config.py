@@ -60,6 +60,14 @@ def test_required_values_returned(app):
         (10**9, 100_000),
         (0, 100_000),
         (True, 100_000),
+        (False, 100_000),
+        (500.0, 499),
+        (500.7, 499),
+        (-5, 100_000),
+        (0.0, 100_000),
+        ("500", 100_000),
+        (float("nan"), 100_000),
+        (float("inf"), 100_000),
     ],
 )
 def test_sql_lab_max_rows_stays_below_sql_max_row(app, sql_max_row, expected):

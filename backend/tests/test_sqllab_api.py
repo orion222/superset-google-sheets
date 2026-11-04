@@ -13,6 +13,7 @@ from michael_s_molina.sqllab_gsheets.api import (
     export_sql,
     GSheetsExportAPI,
     SQL_ACCESS_DENIED,
+    TEMPLATED_SQL,
 )
 from michael_s_molina.sqllab_gsheets.errors import ExportRejected
 from michael_s_molina.sqllab_gsheets.google_sheets import GoogleExportError, Tab
@@ -100,6 +101,27 @@ def test_sql_export_access_check_failure_is_generic_500(app, m):
         export_sql(DB, "select 1", None, None, "u@x.com", NOW)
     assert (e.value.status, e.value.message) == (500, GENERIC)
     m.execute.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "select * from {{ ['public_t', 'secret_t'] | random }}",
+        "{% set t = 'secret_t' %}select 1",
+        "select * from public_t -- {#\nunion all select * from secret_t\n-- #}",
+    ],
+)
+def test_sql_export_refuses_templated_sql(app, m, sql):
+    with pytest.raises(ExportRejected) as e:
+        export_sql(DB, sql, None, None, "u@x.com", NOW)
+    assert (e.value.status, e.value.message) == (400, TEMPLATED_SQL)
+    m.security_manager.raise_for_access.assert_not_called()
+    m.execute.assert_not_called()
+
+
+def test_sql_export_runs_plain_sql_with_braces_in_literals(app, m):
+    export_sql(DB, "select '{ }' as a, '%' as b", None, None, "u@x.com", NOW)
+    m.execute.assert_called_once()
 
 
 def test_sql_export_checks_access_to_the_sql_then_runs_it(app, m):

@@ -120,6 +120,7 @@ A SQL Lab export also needs what running the same SQL in SQL Lab needs, and is r
 - `can execute sql query on SQLLab` (the `sql_lab` role grants it).
 - A database with **Expose in SQL Lab** turned on.
 - Access to every table the SQL reads. The check matches SQL Lab's: database access, or `datasource_access` on a registered dataset for each table.
+- SQL without Jinja templating. SQL containing `{{`, `{%` or `{#` is refused, whether or not `ENABLE_TEMPLATE_PROCESSING` is on, because a template can render differently for the access check and for the query. Run templated queries in SQL Lab and use **Export to .CSV**.
 
 ### Default role grants
 

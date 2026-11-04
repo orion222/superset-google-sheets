@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from flask import current_app
@@ -35,9 +36,13 @@ def sql_lab_max_rows() -> int:
     """Most rows a SQL Lab export takes; kept below SQL_MAX_ROW so truncation shows."""
     cap = sync_max_rows()
     sql_max_row = current_app.config.get("SQL_MAX_ROW")
-    if isinstance(sql_max_row, int) and not isinstance(sql_max_row, bool):
-        if sql_max_row > 0:
-            cap = min(cap, sql_max_row - 1)
+    if (
+        isinstance(sql_max_row, (int, float))
+        and not isinstance(sql_max_row, bool)
+        and math.isfinite(sql_max_row)
+        and int(sql_max_row) > 0
+    ):
+        cap = min(cap, int(sql_max_row) - 1)
     return cap
 
 

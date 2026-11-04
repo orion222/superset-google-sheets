@@ -29,6 +29,12 @@ from .google_sheets import (
 logger = logging.getLogger(__name__)
 
 SQL_ACCESS_DENIED = "You don't have access to run this query."
+TEMPLATED_SQL = (
+    "Templated SQL can't be exported to Google Sheets. "
+    "Remove the Jinja syntax and try again."
+)
+# Separate renders for the access check and the execution can differ.
+_JINJA_MARKERS = ("{{", "{%", "{#")
 
 
 def execute_query(
@@ -39,8 +45,9 @@ def execute_query(
 ) -> pd.DataFrame:
     logger.info("Executing query on database %s", database.id)
 
-    # One row past the cap, so an oversize result is detectable. template_params={}
-    # makes the executor render Jinja exactly as check_sql_access's check did.
+    # One row past the cap, so an oversize result is detectable. The executor and
+    # check_sql_access both get template_params={}; templated SQL is refused, so
+    # both render the same plain text.
     options = QueryOptions(
         catalog=catalog,
         schema=schema,
@@ -99,6 +106,9 @@ def export_sql(
 ) -> tuple[str, int]:
     if not email or not can_export_data():
         raise ExportRejected(403, "You don't have permission to export to Google Sheets.")
+    # Refused whatever ENABLE_TEMPLATE_PROCESSING says; the flag isn't readable here.
+    if any(marker in sql for marker in _JINJA_MARKERS):
+        raise ExportRejected(400, TEMPLATED_SQL)
     check_sql_access(database, sql, catalog, schema)
 
     try:
