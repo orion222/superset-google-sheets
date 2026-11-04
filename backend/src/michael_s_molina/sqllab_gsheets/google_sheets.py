@@ -14,6 +14,7 @@ from googleapiclient.errors import HttpError
 
 from .cells import CellValue
 from .config import service_account_info, shared_drive_folder_id
+from .errors import ExportRejected
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,8 @@ SCOPES = [
 MAX_WRITE_BYTES = 2_000_000
 MAX_ATTEMPTS = 5
 RETRYABLE_STATUSES = {429, 500, 503}
+# Google's per-spreadsheet cell limit.
+MAX_CELLS = 10_000_000
 DATE_FORMAT = {"type": "DATE_TIME", "pattern": "yyyy-mm-dd hh:mm:ss"}
 # Sheet ID Google assigns to the tab every new spreadsheet starts with.
 DEFAULT_SHEET_ID = 0
@@ -47,6 +50,17 @@ def tab_label(chart_id: int | None, chart_name: str, index: int) -> str:
         return chart_name if index == 0 else f"{chart_name} ({index})"
     prefix = str(chart_id) if index == 0 else f"{chart_id}.{index}"
     return f"{prefix} - {chart_name}"
+
+
+def check_cell_limit(tabs: list[Tab]) -> None:
+    """Refuse tabs that would exceed Google's cell limit, before any Google call."""
+    cells = sum(len(tab.rows) * len(tab.rows[0]) for tab in tabs if tab.rows)
+    if cells > MAX_CELLS:
+        raise ExportRejected(
+            400,
+            f"Too large for Google Sheets ({cells:,} cells, limit {MAX_CELLS:,}). "
+            "Use Export to .CSV instead.",
+        )
 
 
 def _execute(request: Any) -> Any:

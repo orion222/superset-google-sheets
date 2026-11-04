@@ -79,12 +79,22 @@ def temporal_columns(result: ChartQueryResult) -> list[int]:
     ]
 
 
+_TEMPORAL_INFERRED = {"date", "datetime", "datetime64"}
+
+
+def _is_temporal(column: pd.Series) -> bool:
+    # pyarrow's integer_object_nulls frames hold dates as objects, not datetime64.
+    if pd.api.types.is_datetime64_any_dtype(column.dtype):
+        return True
+    return column.dtype == object and (
+        pd.api.types.infer_dtype(column, skipna=True) in _TEMPORAL_INFERRED
+    )
+
+
 def dataframe_rows(df: pd.DataFrame) -> tuple[list[list[CellValue]], list[int]]:
-    """Header-first rows plus the indexes of `datetime64` columns, for SQL Lab results."""
+    """Header-first rows plus the indexes of date columns, for SQL Lab results."""
     temporal = [
-        index
-        for index, dtype in enumerate(df.dtypes)
-        if pd.api.types.is_datetime64_any_dtype(dtype)
+        index for index in range(df.shape[1]) if _is_temporal(df.iloc[:, index])
     ]
     rows: list[list[CellValue]] = [[str(name) for name in df.columns]]
     for record in df.itertuples(index=False, name=None):

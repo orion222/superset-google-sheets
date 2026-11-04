@@ -17,8 +17,14 @@ from superset_core.rest_api.api import RestApi
 from superset_core.rest_api.decorators import api
 
 from .cells import dataframe_rows
+from .config import sync_max_rows
 from .errors import ExportRejected
-from .google_sheets import create_spreadsheet, GoogleExportError, Tab
+from .google_sheets import (
+    check_cell_limit,
+    create_spreadsheet,
+    GoogleExportError,
+    Tab,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +41,9 @@ def execute_query(
 ) -> pd.DataFrame:
     logger.info("Executing query on database %s", database.id)
 
-    result = database.execute(sql, QueryOptions(catalog=catalog, schema=schema))
+    # One row past the limit, so an oversize result is detectable.
+    options = QueryOptions(catalog=catalog, schema=schema, limit=sync_max_rows() + 1)
+    result = database.execute(sql, options)
 
     if result.status != QueryStatus.SUCCESS:
         raise ValueError(result.error_message or "Query execution failed")
@@ -93,11 +101,21 @@ def export_sql(
         logger.exception("SQL Lab query failed during Google Sheets export")
         raise ExportRejected(500, GENERIC_FAILURE) from ex
 
+    limit = sync_max_rows()
+    if len(df.index) > limit:
+        raise ExportRejected(
+            400,
+            f"Too large for Google Sheets (more than {limit} rows). "
+            "Use Export to .CSV instead.",
+        )
+
     rows, temporal = dataframe_rows(df)
+    tabs = [Tab("Results", rows, temporal)]
+    check_cell_limit(tabs)
     title = f"SQL Lab export · {now.strftime('%Y-%m-%d %H:%M')} UTC"
 
     try:
-        url = create_spreadsheet(title, [Tab("Results", rows, temporal)], email)
+        url = create_spreadsheet(title, tabs, email)
     except GoogleExportError as ex:
         logger.exception("Google Sheets export failed")
         raise ExportRejected(500, GENERIC_FAILURE) from ex

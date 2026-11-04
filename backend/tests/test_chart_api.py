@@ -124,6 +124,16 @@ def test_too_many_rows_is_400_before_any_google_call(app, m):
     m.create_spreadsheet.assert_not_called()
 
 
+def test_too_many_cells_is_400_before_any_google_call(app, m):
+    m.run_query_context.return_value = ONE * 2
+    with patch("michael_s_molina.sqllab_gsheets.google_sheets.MAX_CELLS", 3):
+        with pytest.raises(ExportRejected) as e:
+            export_chart(PAYLOAD, "x", "u@x.com", NOW)
+    assert e.value.status == 400
+    assert e.value.message.startswith("Too large for Google Sheets (4 cells,")
+    m.create_spreadsheet.assert_not_called()
+
+
 def test_capabilities_reflects_export_permission(app, m):
     m.can_export_data.return_value = False
     assert capabilities(email="u@x.com") == {"can_export": False}

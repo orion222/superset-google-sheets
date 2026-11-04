@@ -102,3 +102,31 @@ def test_dataframe_rows_yield_plain_python_types():
     rows, _ = dataframe_rows(df)
     assert type(rows[1][0]) is int
     assert rows[1][1] == ""
+
+
+def test_dataframe_rows_detects_pyarrow_date32_columns():
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table(
+        {
+            "d": pa.array([date(2026, 1, 2), None], type=pa.date32()),
+            "n": pa.array([1, None], type=pa.int64()),
+        }
+    )
+    df = table.to_pandas(integer_object_nulls=True)
+    rows, temporal = dataframe_rows(df)
+    assert temporal == [0]
+    assert rows[1][0] == 46024.0 and rows[2][0] == ""
+
+
+def test_dataframe_rows_detects_object_date_and_datetime_columns():
+    df = pd.DataFrame(
+        {
+            "d": pd.Series([date(2026, 1, 2), None], dtype=object),
+            "dt": pd.Series([datetime(2026, 1, 2, 12), None], dtype=object),
+            "s": pd.Series(["2026-01-02", None], dtype=object),
+            "empty": pd.Series([None, None], dtype=object),
+        }
+    )
+    rows, temporal = dataframe_rows(df)
+    assert temporal == [0, 1]
+    assert rows[1][:3] == [46024.0, 46024.5, "2026-01-02"]

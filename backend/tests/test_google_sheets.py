@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from michael_s_molina.sqllab_gsheets.errors import ExportRejected
 from michael_s_molina.sqllab_gsheets.google_sheets import (
+    check_cell_limit,
     create_spreadsheet,
     GoogleExportError,
     tab_label,
@@ -157,3 +159,19 @@ def test_date_columns_formatted(app, google):
 )
 def test_tab_label(cid, name, i, expected):
     assert tab_label(cid, name, i) == expected
+
+
+def test_cell_limit_counts_header_rows_across_tabs():
+    wide = [[0] * 1000] * 5000
+    check_cell_limit([Tab("a", wide, []), Tab("b", wide, [])])  # exactly 10,000,000
+    with pytest.raises(ExportRejected) as e:
+        check_cell_limit([Tab("a", wide, []), Tab("b", wide + [[0] * 1000], [])])
+    assert (e.value.status, e.value.message) == (
+        400,
+        "Too large for Google Sheets (10,001,000 cells, limit 10,000,000). "
+        "Use Export to .CSV instead.",
+    )
+
+
+def test_cell_limit_ignores_empty_tabs():
+    check_cell_limit([Tab("a", [], [])])

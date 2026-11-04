@@ -20,6 +20,7 @@ from .cells import query_rows, temporal_columns
 from .config import sync_max_rows
 from .errors import ExportRejected
 from .google_sheets import (
+    check_cell_limit,
     create_spreadsheet,
     Tab,
     tab_label,
@@ -102,7 +103,14 @@ def export_chart(
     title = f"{name} · {now.strftime('%Y-%m-%d %H:%M')} UTC"
 
     try:
-        return create_spreadsheet(title, _tabs(payload, name, results), email)
+        tabs = _tabs(payload, name, results)
+    except Exception as ex:
+        logger.exception("Couldn't build Google Sheets tabs for the chart")
+        raise ExportRejected(500, GENERIC_FAILURE) from ex
+    check_cell_limit(tabs)
+
+    try:
+        return create_spreadsheet(title, tabs, email)
     except Exception as ex:
         logger.exception("Google Sheets export failed")
         raise ExportRejected(500, GENERIC_FAILURE) from ex

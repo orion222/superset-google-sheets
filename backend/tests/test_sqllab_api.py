@@ -8,11 +8,14 @@ import pandas as pd
 import pytest
 
 from michael_s_molina.sqllab_gsheets.api import (
+    execute_query,
     export_sql,
     GSheetsExportAPI,
     SQL_ACCESS_DENIED,
 )
 from michael_s_molina.sqllab_gsheets.errors import ExportRejected
+from superset_core.queries.types import QueryResult, QueryStatus, StatementResult
+
 from michael_s_molina.sqllab_gsheets.google_sheets import GoogleExportError, Tab
 
 MODULE = "michael_s_molina.sqllab_gsheets.api"
@@ -135,6 +138,46 @@ def test_sql_export_google_failure_is_generic(app, m):
     with pytest.raises(ExportRejected) as e:
         export_sql(DB, "select 1", None, None, "u@x.com", NOW)
     assert e.value.status == 500 and e.value.message == GENERIC
+
+
+def test_execute_query_caps_rows_one_past_the_sync_limit(app):
+    app.config["GSHEETS_EXPORT_SYNC_MAX_ROWS"] = 5
+    database = MagicMock(name="database")
+    df = pd.DataFrame({"a": [1]})
+    database.execute.return_value = QueryResult(
+        QueryStatus.SUCCESS, [StatementResult("select 1", "select 1", data=df)]
+    )
+    assert execute_query(database, "select 1", "c", "s") is df
+    options = database.execute.call_args.args[1]
+    assert (options.catalog, options.schema, options.limit) == ("c", "s", 6)
+
+
+def test_sql_export_over_row_limit_is_400_before_any_google_call(app, m):
+    app.config["GSHEETS_EXPORT_SYNC_MAX_ROWS"] = 2
+    m.execute.return_value = pd.DataFrame({"a": [1, 2, 3]})
+    with pytest.raises(ExportRejected) as e:
+        export_sql(DB, "select 1", None, None, "u@x.com", NOW)
+    assert (e.value.status, e.value.message) == (
+        400,
+        "Too large for Google Sheets (more than 2 rows). Use Export to .CSV instead.",
+    )
+    m.create_spreadsheet.assert_not_called()
+
+
+def test_sql_export_at_row_limit_is_exported(app, m):
+    app.config["GSHEETS_EXPORT_SYNC_MAX_ROWS"] = 2
+    m.execute.return_value = pd.DataFrame({"a": [1, 2]})
+    assert export_sql(DB, "select 1", None, None, "u@x.com", NOW)[1] == 2
+
+
+def test_sql_export_over_cell_limit_is_400_before_any_google_call(app, m):
+    m.execute.return_value = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+    with patch("michael_s_molina.sqllab_gsheets.google_sheets.MAX_CELLS", 5):
+        with pytest.raises(ExportRejected) as e:
+            export_sql(DB, "select 1", None, None, "u@x.com", NOW)
+    assert e.value.status == 400
+    assert e.value.message.startswith("Too large for Google Sheets (6 cells,")
+    m.create_spreadsheet.assert_not_called()
 
 
 def test_endpoint_is_gated_by_export_permission():
