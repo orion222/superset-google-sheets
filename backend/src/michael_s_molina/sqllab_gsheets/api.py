@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
-from flask import g, request, Response
+from flask import current_app, g, request, Response
 from flask_appbuilder.api import expose, permission_name, protect
 from flask_babel import gettext as __
 from superset_core.common.daos import DatabaseDAO
@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 GENERIC_FAILURE = "Couldn't create the Google Sheet. Try again later."
 INVALID_REQUEST = "Invalid export request."
+SQL_ACCESS_DENIED = "You don't have access to run this query."
 
 
 def execute_query(
@@ -45,6 +46,35 @@ def execute_query(
     return result.statements[0].data
 
 
+def check_sql_access(
+    database: Any,
+    sql: str,
+    catalog: str | None,
+    schema: str | None,
+) -> None:
+    """Refuse SQL the user couldn't run in SQL Lab itself."""
+    sm = current_app.appbuilder.sm
+    if not sm.can_access("can_execute_sql_query", "SQLLab"):
+        raise ExportRejected(403, SQL_ACCESS_DENIED)
+    if not database.expose_in_sqllab:
+        raise ExportRejected(403, SQL_ACCESS_DENIED)
+    try:
+        # SQL Lab's own validator passes force_dataset_match for raw row reads.
+        sm.raise_for_access(
+            database=database,
+            sql=sql,
+            catalog=catalog,
+            schema=schema,
+            force_dataset_match=True,
+        )
+    except Exception as ex:
+        # Superset is not importable here, so the class is matched by name.
+        if type(ex).__name__ == "SupersetSecurityException":
+            raise ExportRejected(403, SQL_ACCESS_DENIED) from ex
+        logger.exception("SQL Lab access check failed during Google Sheets export")
+        raise ExportRejected(500, GENERIC_FAILURE) from ex
+
+
 def export_sql(
     database: Any,
     sql: str,
@@ -55,6 +85,7 @@ def export_sql(
 ) -> tuple[str, int]:
     if not email or not can_export_data():
         raise ExportRejected(403, "You don't have permission to export to Google Sheets.")
+    check_sql_access(database, sql, catalog, schema)
 
     try:
         df = execute_query(database, sql, catalog, schema)
