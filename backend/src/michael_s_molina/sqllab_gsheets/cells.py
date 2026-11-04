@@ -39,9 +39,15 @@ def to_cell(value: Any, coltype: GenericDataType | None) -> CellValue:
     if isinstance(value, date):
         return _serial(datetime(value.year, value.month, value.day))
     if isinstance(value, Decimal):
-        # Integral values stay exact so the 2**53 rule can stringify them.
-        integral = value.is_finite() and value == value.to_integral_value()
-        value = int(value) if integral else float(value)
+        if value.is_snan():
+            return ""
+        if value.is_finite() and value == value.to_integral_value():
+            # Formatted directly: int() and str() hit Python's digit limit on huge values.
+            if abs(value) > _MAX_SAFE_INT:
+                return format(value, "f")
+            value = int(value)
+        else:
+            value = float(value)
     if isinstance(value, int):
         if coltype is GenericDataType.TEMPORAL:
             return _serial(_UNIX_EPOCH + timedelta(milliseconds=value))

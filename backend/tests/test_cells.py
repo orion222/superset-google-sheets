@@ -39,6 +39,10 @@ from michael_s_molina.sqllab_gsheets.cells import (
         (Decimal("9007199254740993"), GenericDataType.NUMERIC, "9007199254740993"),
         (Decimal("42"), GenericDataType.NUMERIC, 42),
         (pd.NA, GenericDataType.NUMERIC, ""),
+        (Decimal("1E+5000"), GenericDataType.NUMERIC, "1" + "0" * 5000),
+        (Decimal("-9007199254740993"), GenericDataType.NUMERIC, "-9007199254740993"),
+        (Decimal("sNaN"), GenericDataType.NUMERIC, ""),
+        (Decimal("NaN"), GenericDataType.NUMERIC, ""),
     ],
 )
 def test_to_cell(value, coltype, expected):
