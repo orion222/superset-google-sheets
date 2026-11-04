@@ -12,7 +12,12 @@ from michael_s_molina.sqllab_gsheets.google_sheets import GoogleExportError
 
 MODULE = "michael_s_molina.sqllab_gsheets.chart_api"
 NOW = datetime(2026, 11, 3, 10, 5, tzinfo=timezone.utc)
+PAYLOAD = {"form_data": {}}
 ONE = [ChartQueryResult(["a"], [GenericDataType.NUMERIC], [{"a": 1}])]
+
+
+class ValidationError(Exception):
+    """Stands in for marshmallow's ValidationError."""
 
 
 class SupersetSecurityException(Exception):
@@ -62,7 +67,7 @@ def test_missing_and_null_slice_id_have_no_id_prefix(app, m):
 
 
 def test_untitled_chart(app, m):
-    export_chart({}, None, "u@x.com", NOW)
+    export_chart(PAYLOAD, None, "u@x.com", NOW)
     assert m.create_spreadsheet.call_args.args[0].startswith("Untitled chart · ")
 
 
@@ -78,28 +83,29 @@ def test_multi_query_tabs(app, m):
 def test_no_export_permission_is_403(app, m):
     m.can_export_data.return_value = False
     with pytest.raises(ExportRejected) as e:
-        export_chart({}, "x", "u@x.com", NOW)
+        export_chart(PAYLOAD, "x", "u@x.com", NOW)
     assert e.value.status == 403
     m.run_query_context.assert_not_called()
 
 
 def test_no_email_is_403(app, m):
     with pytest.raises(ExportRejected) as e:
-        export_chart({}, "x", None, NOW)
+        export_chart(PAYLOAD, "x", None, NOW)
     assert e.value.status == 403
+    m.run_query_context.assert_not_called()
 
 
 def test_access_denied_is_403(app, m):
     m.run_query_context.side_effect = SupersetSecurityException()
     with pytest.raises(ExportRejected) as e:
-        export_chart({}, "x", "u@x.com", NOW)
+        export_chart(PAYLOAD, "x", "u@x.com", NOW)
     assert e.value.status == 403
 
 
 def test_query_failure_is_generic_500(app, m):
     m.run_query_context.side_effect = RuntimeError("secret table details")
     with pytest.raises(ExportRejected) as e:
-        export_chart({}, "x", "u@x.com", NOW)
+        export_chart(PAYLOAD, "x", "u@x.com", NOW)
     assert e.value.status == 500
     assert "secret" not in e.value.message
 
@@ -110,7 +116,7 @@ def test_too_many_rows_is_400_before_any_google_call(app, m):
         ChartQueryResult(["a"], [GenericDataType.NUMERIC], [{"a": 1}, {"a": 2}])
     ]
     with pytest.raises(ExportRejected) as e:
-        export_chart({}, "x", "u@x.com", NOW)
+        export_chart(PAYLOAD, "x", "u@x.com", NOW)
     assert (e.value.status, e.value.message) == (
         400,
         "Too large for Google Sheets (2 rows, limit 1). Use Export to .CSV instead.",
@@ -129,8 +135,47 @@ def test_capabilities_reflects_export_permission(app, m):
 def test_google_failure_is_generic_500(app, m):
     m.create_spreadsheet.side_effect = GoogleExportError()
     with pytest.raises(ExportRejected) as e:
-        export_chart({}, "x", "u@x.com", NOW)
+        export_chart(PAYLOAD, "x", "u@x.com", NOW)
     assert (e.value.status, e.value.message) == (
         500,
         "Couldn't create the Google Sheet. Try again later.",
     )
+
+
+@pytest.mark.parametrize(
+    ("payload", "name"),
+    [
+        (None, "x"),
+        ({}, "x"),
+        ([], "x"),
+        ("q", "x"),
+        ({"form_data": []}, "x"),
+        ({"form_data": "a"}, "x"),
+        (PAYLOAD, 5),
+        (PAYLOAD, ["x"]),
+    ],
+)
+def test_malformed_request_is_400(app, m, payload, name):
+    with pytest.raises(ExportRejected) as e:
+        export_chart(payload, name, "u@x.com", NOW)
+    assert (e.value.status, e.value.message) == (400, "Invalid export request.")
+    m.run_query_context.assert_not_called()
+
+
+@pytest.mark.parametrize("exc", [ValidationError("secret"), ValueError("secret")])
+def test_query_validation_errors_are_400(app, m, exc):
+    m.run_query_context.side_effect = exc
+    with pytest.raises(ExportRejected) as e:
+        export_chart(PAYLOAD, "x", "u@x.com", NOW)
+    assert (e.value.status, e.value.message) == (400, "Invalid export request.")
+
+
+def test_tab_building_failure_is_generic_500(app, m):
+    with patch(f"{MODULE}.build_tab_name", side_effect=ValueError("boom")):
+        with pytest.raises(ExportRejected) as e:
+            export_chart(PAYLOAD, "x", "u@x.com", NOW)
+    assert (e.value.status, e.value.message) == (
+        500,
+        "Couldn't create the Google Sheet. Try again later.",
+    )
+    m.create_spreadsheet.assert_not_called()
