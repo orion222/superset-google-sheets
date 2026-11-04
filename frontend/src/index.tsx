@@ -1,77 +1,125 @@
-import { sqlLab, commands, menus, authentication } from '@apache-superset/core';
-import { message } from 'antd';
+import { sqlLab, commands, menus, toasts } from '@apache-superset/core';
+import { exportChart } from './chartExport';
+import { EXTENSION_BASE, getJson, postJson } from './client';
+import { ChartDownloadContext } from './coreTypes';
 
-menus.registerMenuItem(
-  { view: 'builtin.editor', command: 'sqllab_gsheets.export' },
-  'sqllab.editor',
-  'secondary',
-);
+const CHART_LOCATIONS = [
+  'explore.chart.download',
+  'explore.standalone.download',
+  'dashboard.chart.download',
+  'chart.drillDetail.download',
+  'chart.drillBy.download',
+] as const;
 
-commands.registerCommand(
-  { id: 'sqllab_gsheets.export', title: 'Export to Google Sheets', description: 'Export current SQL query results to Google Sheets' },
-  async () => {
-    const currentTab = sqlLab.getCurrentTab();
+const PIVOTED_CHART_LOCATIONS = [
+  'explore.chart.download.pivoted',
+  'dashboard.chart.download.pivoted',
+] as const;
 
-    if (!currentTab) {
-      message.warning('No active tab found.');
-      return;
-    }
+const SHEETS_LINK_LABEL = 'Open in Google Sheets';
 
-    const editor = await currentTab.getEditor();
-    const sql = editor.getValue()?.trim();
+async function exportSqlLab(): Promise<void> {
+  const currentTab = sqlLab.getCurrentTab();
 
-    if (!sql) {
-      message.warning('No SQL query to export. Please write a query first.');
-      return;
-    }
+  if (!currentTab) {
+    toasts.addWarningToast('No active tab found.');
+    return;
+  }
 
-    if (!currentTab.databaseId) {
-      message.warning('No database selected. Please select a database first.');
-      return;
-    }
+  const editor = await currentTab.getEditor();
+  const sql = editor.getValue()?.trim();
 
-    const hideLoading = message.loading('Exporting to Google Sheets...', 0);
+  if (!sql) {
+    toasts.addWarningToast('No SQL query to export. Please write a query first.');
+    return;
+  }
 
-    try {
-      const csrfToken = await authentication.getCSRFToken();
+  if (!currentTab.databaseId) {
+    toasts.addWarningToast('No database selected. Please select a database first.');
+    return;
+  }
 
-      const response = await fetch('/extensions/michael-s-molina/sqllab-gsheets/export/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-CSRFToken': csrfToken!,
-        },
-        body: JSON.stringify({
-          sql,
-          databaseId: currentTab.databaseId,
-          catalog: currentTab.catalog,
-          schema: currentTab.schema,
-        }),
+  const pendingId = toasts.addInfoToast('Exporting to Google Sheets...', {
+    duration: 0,
+  });
+
+  try {
+    const data = await postJson<{ spreadsheet_url?: string; row_count: number }>(
+      `${EXTENSION_BASE}/export/`,
+      {
+        sql,
+        databaseId: currentTab.databaseId,
+        catalog: currentTab.catalog,
+        schema: currentTab.schema,
+      },
+    );
+    if (data.spreadsheet_url) {
+      toasts.addSuccessToast(`Exported ${data.row_count} rows to Google Sheets`, {
+        duration: 0,
+        link: { href: data.spreadsheet_url, label: SHEETS_LINK_LABEL },
       });
-
-      hideLoading();
-
-      if (response.ok) {
-        const data = await response.json();
-        const spreadsheetUrl = data.spreadsheet_url;
-        if (spreadsheetUrl) {
-          message.success(`Exported ${data.row_count} rows to Google Sheets`);
-          window.open(spreadsheetUrl, '_blank');
-        }
-      } else {
-        let errorMessage = 'Export failed';
-        try {
-          const errorData = await response.json();
-          errorMessage = errorData.message || errorMessage;
-        } catch {
-          errorMessage = `Export failed: ${response.statusText || `HTTP ${response.status}`}`;
-        }
-        message.error(errorMessage);
-      }
-    } catch (error) {
-      hideLoading();
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      message.error(`Export failed: ${errorMessage}`);
     }
-  },
-);
+  } catch (error) {
+    toasts.addDangerToast(
+      error instanceof Error && error.message ? error.message : 'Export failed',
+    );
+  } finally {
+    toasts.removeToast(pendingId);
+  }
+}
+
+function register(): void {
+  commands.registerCommand(
+    {
+      id: 'sqllab_gsheets.export',
+      title: 'Export to Google Sheets',
+      description: 'Export current SQL query results to Google Sheets',
+    },
+    exportSqlLab,
+  );
+  commands.registerCommand(
+    {
+      id: 'sqllab_gsheets.exportChart',
+      title: 'Export to Google Sheets',
+      description: 'Export chart data to Google Sheets',
+    },
+    (ctx: ChartDownloadContext) => exportChart(ctx),
+  );
+  commands.registerCommand(
+    {
+      id: 'sqllab_gsheets.exportChartPivoted',
+      title: 'Export pivoted to Google Sheets',
+      description: 'Export pivoted chart data to Google Sheets',
+    },
+    (ctx: ChartDownloadContext) => exportChart(ctx, 'post_processed'),
+  );
+
+  menus.registerMenuItem(
+    { view: 'builtin.editor', command: 'sqllab_gsheets.export' },
+    'sqllab.editor',
+    'secondary',
+  );
+  CHART_LOCATIONS.forEach(location =>
+    menus.registerMenuItem(
+      { view: location, command: 'sqllab_gsheets.exportChart' },
+      location,
+      'primary',
+    ),
+  );
+  PIVOTED_CHART_LOCATIONS.forEach(location =>
+    menus.registerMenuItem(
+      { view: location, command: 'sqllab_gsheets.exportChartPivoted' },
+      location,
+      'primary',
+    ),
+  );
+}
+
+// Users without the extension permission get a 403 here and see none of the items.
+getJson<{ can_export: boolean }>(`${EXTENSION_BASE}/chart/capabilities`)
+  .then(({ can_export }) => {
+    if (can_export) {
+      register();
+    }
+  })
+  .catch(() => undefined);
