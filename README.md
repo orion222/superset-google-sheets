@@ -20,7 +20,11 @@ The **Export to Google Sheets** item appears in:
 - **Drill By**.
 - SQL Lab's editor menu.
 
-The items appear only for users with the `can export on GoogleSheets` permission. The frontend registers them after `GET /extensions/michael-s-molina/sqllab-gsheets/chart/capabilities` succeeds, so other users see none.
+Who sees the items:
+
+- **Hidden** for users without the `can export on GoogleSheets` permission or without an email address on their Superset account. The frontend registers the items only after `GET /extensions/michael-s-molina/sqllab-gsheets/chart/capabilities` succeeds and reports `can_export`.
+- **Disabled** in the chart menus for users without `can_csv` (or `can_export_data` when `GRANULAR_EXPORT_CONTROLS` is on), like Superset's own download items.
+- The SQL Lab item is never disabled. For a user who lacks a required permission, the export fails with a permission error.
 
 ## What gets exported
 
@@ -97,21 +101,55 @@ Exports are created in a Shared Drive folder, not in the service account's own D
 3. Limit membership to the service account and break-glass admins only. **Never add a team group.**
 4. Turn on **Allow people who aren't shared drive members to access files**, so the users each export is shared with can open it.
 5. Set a retention policy so old exports are removed.
-6. Set `GSHEETS_SHARED_DRIVE_FOLDER_ID` to the ID of the Drive or of a folder in it.
+6. Set `GSHEETS_SHARED_DRIVE_FOLDER_ID` to the ID of the Drive or of a folder in it. Open the Drive or folder in Google Drive; the ID is the last path segment of its URL. For `https://drive.google.com/drive/folders/0ABcDeFgHiJkLmN`, the ID is `0ABcDeFgHiJkLmN`.
 
 Why no team group: every Drive member sees every export. That bypasses Superset's row-level security and dataset permissions, which only apply to the user who ran the export.
 
 ## Permissions
 
-- Grant `can export on GoogleSheets` to each role that should export. It is granted to no role by default.
-- Users also need `can_csv`, or `can_export_data` when `GRANULAR_EXPORT_CONTROLS` is on.
-- Users need an email address on their Superset account, because the spreadsheet is shared with it.
+Every export needs all of:
+
+- `can export on GoogleSheets`.
+- `can_csv`, or `can_export_data` when `GRANULAR_EXPORT_CONTROLS` is on.
+- An email address on the user's Superset account, because the spreadsheet is shared with it.
+
+A chart export runs the chart's query with Superset's own access checks, so it returns only data the user could already download from that chart.
+
+A SQL Lab export also needs what running the same SQL in SQL Lab needs, and is refused with a permission error otherwise:
+
+- `can execute sql query on SQLLab` (the `sql_lab` role grants it).
+- A database with **Expose in SQL Lab** turned on.
+- Access to every table the SQL reads. The check matches SQL Lab's: database access, or `datasource_access` on a registered dataset for each table.
+
+### Default role grants
+
+Superset's role sync, which runs on every `superset init`, grants `can export on GoogleSheets` to **Gamma** and **Alpha** (and Admin). With the checks above, a Gamma user can export only chart data they could already download, and SQL Lab results only if they also hold SQL Lab rights.
+
+Removing the permission from Gamma or Alpha in the UI does not last: the role sync replaces those roles' permissions on the next `superset init`. To restrict export, either:
+
+- give the users who shouldn't export a custom role, copied from Gamma or Alpha without `can export on GoogleSheets`, instead of the built-in role; or
+- keep the permission out of the built-in roles with a custom security manager, then grant it to custom roles:
+
+  ```python
+  from superset.security import SupersetSecurityManager
+
+  class SecurityManager(SupersetSecurityManager):
+      ADMIN_ONLY_VIEW_MENUS = SupersetSecurityManager.ADMIN_ONLY_VIEW_MENUS | {
+          "GoogleSheets"
+      }
+
+  CUSTOM_SECURITY_MANAGER = SecurityManager
+  ```
 
 **Upgrading from 1.0.0:** SQL Lab export used to require only `read`. It now requires all of the above, so grant them to the roles that already export from SQL Lab.
 
 ## Limits
 
-A single-chart export with more than `GSHEETS_EXPORT_SYNC_MAX_ROWS` rows (counted across all its queries) is refused with a "Too large for Google Sheets…" message before any file is created. Use **Export to .CSV** for those.
+These exports are refused with a "Too large for Google Sheets…" message before any file is created. Use **Export to .CSV** for them.
+
+- A chart export with more than `GSHEETS_EXPORT_SYNC_MAX_ROWS` rows, counted across all its queries.
+- A SQL Lab export with more than `GSHEETS_EXPORT_SYNC_MAX_ROWS` rows. The query fetches at most one row past the limit; Superset's `SQL_MAX_ROW` also caps it when smaller.
+- Any export over Google's limit of 10,000,000 cells per spreadsheet, counted as rows (including the header row) times columns, summed over tabs.
 
 ## Development
 
