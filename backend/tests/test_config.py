@@ -5,6 +5,7 @@ from michael_s_molina.sqllab_gsheets.config import (
     GoogleSheetsConfigError,
     service_account_info,
     shared_drive_folder_id,
+    sql_lab_max_rows,
     sync_max_rows,
 )
 
@@ -48,3 +49,20 @@ def test_empty_required_key_raises(app, key, fn):
 def test_required_values_returned(app):
     assert shared_drive_folder_id() == "folder-1"
     assert service_account_info() == {"type": "service_account"}
+
+
+@pytest.mark.parametrize(
+    ("sql_max_row", "expected"),
+    [
+        (None, 100_000),
+        (100_000, 99_999),
+        (500, 499),
+        (10**9, 100_000),
+        (0, 100_000),
+        (True, 100_000),
+    ],
+)
+def test_sql_lab_max_rows_stays_below_sql_max_row(app, sql_max_row, expected):
+    if sql_max_row is not None:
+        app.config["SQL_MAX_ROW"] = sql_max_row
+    assert sql_lab_max_rows() == expected

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+from superset_core.queries.types import QueryResult, QueryStatus, StatementResult
 
 from michael_s_molina.sqllab_gsheets.api import (
     execute_query,
@@ -14,8 +15,6 @@ from michael_s_molina.sqllab_gsheets.api import (
     SQL_ACCESS_DENIED,
 )
 from michael_s_molina.sqllab_gsheets.errors import ExportRejected
-from superset_core.queries.types import QueryResult, QueryStatus, StatementResult
-
 from michael_s_molina.sqllab_gsheets.google_sheets import GoogleExportError, Tab
 
 MODULE = "michael_s_molina.sqllab_gsheets.api"
@@ -111,6 +110,7 @@ def test_sql_export_checks_access_to_the_sql_then_runs_it(app, m):
         sql="select * from t",
         catalog="c",
         schema="s",
+        template_params={},
         force_dataset_match=True,
     )
     m.execute.assert_called_once_with(DB, "select * from t", "c", "s")
@@ -150,6 +150,40 @@ def test_execute_query_caps_rows_one_past_the_sync_limit(app):
     assert execute_query(database, "select 1", "c", "s") is df
     options = database.execute.call_args.args[1]
     assert (options.catalog, options.schema, options.limit) == ("c", "s", 6)
+    assert options.template_params == {}
+
+
+def _database_returning(df):
+    database = MagicMock(name="database")
+    database.execute.return_value = QueryResult(
+        QueryStatus.SUCCESS, [StatementResult("select 1", "select 1", data=df)]
+    )
+    return database
+
+
+def test_sql_export_refuses_a_result_at_superset_sql_max_row(app, m):
+    app.config["GSHEETS_EXPORT_SYNC_MAX_ROWS"] = 3
+    app.config["SQL_MAX_ROW"] = 3
+    database = _database_returning(pd.DataFrame({"a": [1, 2, 3]}))
+    database.expose_in_sqllab = True
+    m.execute.side_effect = execute_query
+    with pytest.raises(ExportRejected) as e:
+        export_sql(database, "select 1", None, None, "u@x.com", NOW)
+    assert (e.value.status, e.value.message) == (
+        400,
+        "Too large for Google Sheets (more than 2 rows). Use Export to .CSV instead.",
+    )
+    assert database.execute.call_args.args[1].limit == 3
+    m.create_spreadsheet.assert_not_called()
+
+
+def test_sql_export_without_sql_max_row_keeps_the_sync_cap(app, m):
+    app.config["GSHEETS_EXPORT_SYNC_MAX_ROWS"] = 3
+    database = _database_returning(pd.DataFrame({"a": [1, 2, 3]}))
+    database.expose_in_sqllab = True
+    m.execute.side_effect = execute_query
+    assert export_sql(database, "select 1", None, None, "u@x.com", NOW)[1] == 3
+    assert database.execute.call_args.args[1].limit == 4
 
 
 def test_sql_export_over_row_limit_is_400_before_any_google_call(app, m):

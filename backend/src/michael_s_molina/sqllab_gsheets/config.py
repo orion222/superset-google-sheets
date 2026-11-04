@@ -31,6 +31,16 @@ def sync_max_rows() -> int:
     return current_app.config.get("GSHEETS_EXPORT_SYNC_MAX_ROWS", DEFAULT_SYNC_MAX_ROWS)
 
 
+def sql_lab_max_rows() -> int:
+    """Most rows a SQL Lab export takes; kept below SQL_MAX_ROW so truncation shows."""
+    cap = sync_max_rows()
+    sql_max_row = current_app.config.get("SQL_MAX_ROW")
+    if isinstance(sql_max_row, int) and not isinstance(sql_max_row, bool):
+        if sql_max_row > 0:
+            cap = min(cap, sql_max_row - 1)
+    return cap
+
+
 def export_timeout_seconds() -> int:
     return current_app.config.get(
         "GSHEETS_EXPORT_TIMEOUT_SECONDS", DEFAULT_EXPORT_TIMEOUT_SECONDS

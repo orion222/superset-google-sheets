@@ -17,7 +17,7 @@ from superset_core.rest_api.api import RestApi
 from superset_core.rest_api.decorators import api
 
 from .cells import dataframe_rows
-from .config import sync_max_rows
+from .config import sql_lab_max_rows
 from .errors import ExportRejected, GENERIC_FAILURE, INVALID_REQUEST
 from .google_sheets import (
     check_cell_limit,
@@ -39,8 +39,14 @@ def execute_query(
 ) -> pd.DataFrame:
     logger.info("Executing query on database %s", database.id)
 
-    # One row past the limit, so an oversize result is detectable.
-    options = QueryOptions(catalog=catalog, schema=schema, limit=sync_max_rows() + 1)
+    # One row past the cap, so an oversize result is detectable. template_params={}
+    # makes the executor render Jinja exactly as check_sql_access's check did.
+    options = QueryOptions(
+        catalog=catalog,
+        schema=schema,
+        limit=sql_lab_max_rows() + 1,
+        template_params={},
+    )
     result = database.execute(sql, options)
 
     if result.status != QueryStatus.SUCCESS:
@@ -72,6 +78,7 @@ def check_sql_access(
             sql=sql,
             catalog=catalog,
             schema=schema,
+            template_params={},
             force_dataset_match=True,
         )
     except Exception as ex:
@@ -100,7 +107,7 @@ def export_sql(
         logger.exception("SQL Lab query failed during Google Sheets export")
         raise ExportRejected(500, GENERIC_FAILURE) from ex
 
-    limit = sync_max_rows()
+    limit = sql_lab_max_rows()
     if len(df.index) > limit:
         raise ExportRejected(
             400,

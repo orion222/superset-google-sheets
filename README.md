@@ -148,7 +148,7 @@ Removing the permission from Gamma or Alpha in the UI does not last: the role sy
 These exports are refused with a "Too large for Google Sheets…" message before any file is created. Use **Export to .CSV** for them.
 
 - A chart export with more than `GSHEETS_EXPORT_SYNC_MAX_ROWS` rows, counted across all its queries.
-- A SQL Lab export with more than `GSHEETS_EXPORT_SYNC_MAX_ROWS` rows. The query fetches at most one row past the limit; Superset's `SQL_MAX_ROW` also caps it when smaller.
+- A SQL Lab export with more than `GSHEETS_EXPORT_SYNC_MAX_ROWS` rows, or with `SQL_MAX_ROW` rows or more when Superset's `SQL_MAX_ROW` is set. A result that reaches `SQL_MAX_ROW` may have been cut short by Superset, so it is refused rather than exported truncated. With both at their default of 100,000, the most a SQL Lab export takes is 99,999 rows.
 - Any export over Google's limit of 10,000,000 cells per spreadsheet, counted as rows (including the header row) times columns, summed over tabs.
 
 ## Development
