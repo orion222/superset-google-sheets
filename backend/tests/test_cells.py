@@ -36,10 +36,17 @@ from michael_s_molina.sqllab_gsheets.cells import (
         (1767268800000, GenericDataType.TEMPORAL, 46023.5),  # epoch ms
         ("=SUM(A1)", GenericDataType.STRING, "=SUM(A1)"),  # RAW input: never a formula
         (Decimal("1.25"), GenericDataType.NUMERIC, 1.25),
+        (Decimal("9007199254740993"), GenericDataType.NUMERIC, "9007199254740993"),
+        (Decimal("42"), GenericDataType.NUMERIC, 42),
+        (pd.NA, GenericDataType.NUMERIC, ""),
     ],
 )
 def test_to_cell(value, coltype, expected):
     assert to_cell(value, coltype) == expected
+
+
+def test_to_cell_integral_decimal_becomes_plain_int():
+    assert type(to_cell(Decimal("42"), GenericDataType.NUMERIC)) is int
 
 
 def test_to_cell_numpy_integer_becomes_plain_int():

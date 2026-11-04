@@ -30,7 +30,7 @@ def to_cell(value: Any, coltype: GenericDataType | None) -> CellValue:
     elif isinstance(value, np.generic):
         value = value.item()
 
-    if value is None or value is pd.NaT:
+    if value is None or value is pd.NaT or value is pd.NA:
         return ""
     if isinstance(value, bool):  # before int: bool subclasses int
         return value
@@ -39,7 +39,9 @@ def to_cell(value: Any, coltype: GenericDataType | None) -> CellValue:
     if isinstance(value, date):
         return _serial(datetime(value.year, value.month, value.day))
     if isinstance(value, Decimal):
-        value = float(value)
+        # Integral values stay exact so the 2**53 rule can stringify them.
+        integral = value.is_finite() and value == value.to_integral_value()
+        value = int(value) if integral else float(value)
     if isinstance(value, int):
         if coltype is GenericDataType.TEMPORAL:
             return _serial(_UNIX_EPOCH + timedelta(milliseconds=value))
