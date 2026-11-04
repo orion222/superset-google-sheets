@@ -15,6 +15,8 @@ from superset_core.rest_api.api import RestApi
 from superset_core.rest_api.decorators import api
 from superset_core.queries.types import QueryOptions, QueryStatus
 
+from .config import service_account_info
+
 logger = logging.getLogger(__name__)
 
 
@@ -135,9 +137,7 @@ class GSheetsExportAPI(RestApi):
         - auth_uri: Auth URI (usually "https://accounts.google.com/o/oauth2/auth")
         - token_uri: Token URI (usually "https://oauth2.googleapis.com/token")
         """
-        service_account_info = current_app.config.get("GSHEETS_SERVICE_ACCOUNT")
-        if not service_account_info:
-            raise ValueError(__("GSHEETS_SERVICE_ACCOUNT config is not set"))
+        info = service_account_info()
 
         required_keys = [
             "type",
@@ -149,7 +149,7 @@ class GSheetsExportAPI(RestApi):
             "auth_uri",
             "token_uri",
         ]
-        missing_keys = [key for key in required_keys if key not in service_account_info]
+        missing_keys = [key for key in required_keys if key not in info]
 
         if missing_keys:
             raise ValueError(
@@ -160,7 +160,7 @@ class GSheetsExportAPI(RestApi):
             )
 
         return service_account.Credentials.from_service_account_info(
-            service_account_info,
+            info,
             scopes=[
                 "https://www.googleapis.com/auth/spreadsheets",
                 "https://www.googleapis.com/auth/drive",
