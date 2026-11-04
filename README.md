@@ -154,6 +154,75 @@ These exports are refused with a "Too large for Google Sheets…" message before
 
 ## Development
 
+### Running against a local Superset
+
+Dev mode loads the extension straight from this folder, so you don't need to bundle a `.supx` file. You need a Superset checkout that includes the core APIs listed under [Requirements](#requirements), with its own virtualenv (`.venv` below).
+
+1. Install the extension's Python dependencies into Superset's virtualenv. Superset doesn't install an extension's dependencies:
+
+   ```bash
+   /path/to/superset/.venv/bin/pip install "google-api-python-client>=2.0.0" "google-auth>=2.0.0"
+   ```
+
+2. Set up a service account and a Shared Drive as described in [Setting up the service account](#setting-up-the-service-account) and [Shared Drive setup](#shared-drive-setup).
+
+3. Add the following to your `superset_config.py`. If you don't already have one, create it and point `SUPERSET_CONFIG_PATH` at it:
+
+   ```python
+   import json
+
+   FEATURE_FLAGS = {"ENABLE_EXTENSIONS": True}
+   LOCAL_EXTENSIONS = ["/path/to/superset-google-sheets"]
+
+   with open("/path/to/service-account.json") as f:
+       GSHEETS_SERVICE_ACCOUNT = json.load(f)
+   GSHEETS_SHARED_DRIVE_FOLDER_ID = "your-shared-drive-folder-id"
+   ```
+
+4. Build the extension and rebuild it whenever a file changes. Superset reads `dist/`, so run this before starting Superset:
+
+   ```bash
+   cd /path/to/superset-google-sheets
+   /path/to/superset/.venv/bin/superset-extensions dev
+   ```
+
+5. In a second terminal, start the Superset backend. `superset init` creates the `can export on GoogleSheets` permission:
+
+   ```bash
+   cd /path/to/superset
+   .venv/bin/superset init
+   .venv/bin/superset run -p 8088 --reload --debugger
+   ```
+
+6. In a third terminal, start the Superset frontend:
+
+   ```bash
+   cd /path/to/superset/superset-frontend
+   npm run dev-server
+   ```
+
+7. Give your Superset user an email address under **Settings > List Users**. Without one, the menu items don't appear.
+
+With Docker Compose instead: the dev config already turns on `ENABLE_EXTENSIONS` and loads `.supx` files from `docker/extensions/`. Run `superset-extensions bundle`, copy the `.supx` file there, install the two Google packages inside the container, and restart it.
+
+### Manual checks
+
+- Open a chart, choose **Download**, then **Export to Google Sheets**. A "Sending to Google Sheets…" toast appears, then a success toast with **Open in Google Sheets**. The file is in the Shared Drive folder and shared with your email.
+- A pivot table also shows **Export pivoted to Google Sheets**.
+- The item also appears in:
+  - a dashboard chart's **Download** menu;
+  - the standalone chart view (`?standalone=1`);
+  - **Drill to Detail**;
+  - **Drill By**;
+  - SQL Lab's editor menu.
+- These exports are refused:
+  - SQL containing `{{ }}`: refused as templated SQL.
+  - A chart over the row limit. Set `GSHEETS_EXPORT_SYNC_MAX_ROWS = 10` to try it with a small chart: refused as too large.
+  - A SQL Lab export by a Gamma user without SQL Lab rights: refused with a permission error.
+- Export a chart with about 100,000 rows and 20 columns, and check that it finishes within your web server's request timeout.
+
+### Tests
+
 Backend tests:
 
 ```bash
