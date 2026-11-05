@@ -6,6 +6,7 @@
   "license": "Apache-2.0",
   "permissions": [
     "can_read",
-    "can_view"
+    "can_view",
+    "can_export"
   ]
 }
