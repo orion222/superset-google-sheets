@@ -38,6 +38,8 @@ class FakeGoogle:
         self.sheets = MagicMock(name="sheets")
         self.call_order: list[tuple[str]] = []
         self.sleep_calls: list[float] = []
+        self.service_account_factory = MagicMock(name="service_account_factory")
+        self.user_factory = MagicMock(name="user_factory")
         self._failures: dict[str, tuple[int, int]] = {}
         self._wire()
 
@@ -96,7 +98,14 @@ def google():
             f"{module}.build",
             side_effect=lambda name, *_, **__: fake.drive if name == "drive" else fake.sheets,
         ),
-        patch(f"{module}.service_account.Credentials.from_service_account_info"),
+        patch(
+            f"{module}.service_account.Credentials.from_service_account_info"
+        ) as service_account_factory,
+        patch(
+            f"{module}.user_credentials.Credentials.from_authorized_user_info"
+        ) as user_factory,
         patch(f"{module}.time.sleep", side_effect=fake.sleep_calls.append),
     ):
+        fake.service_account_factory = service_account_factory
+        fake.user_factory = user_factory
         yield fake

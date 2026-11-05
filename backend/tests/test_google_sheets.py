@@ -175,3 +175,32 @@ def test_cell_limit_counts_header_rows_across_tabs():
 
 def test_cell_limit_ignores_empty_tabs():
     check_cell_limit([Tab("a", [], [])])
+
+
+USER_INFO = {"type": "authorized_user", "client_id": "c", "client_secret": "s", "refresh_token": "r"}
+
+
+def test_service_account_uses_drive_and_sheets_scopes(app, google):
+    create_spreadsheet("t", [Tab("a", [["h"]], [])], "u@x.com")
+    google.service_account_factory.assert_called_once_with(
+        {"type": "service_account"},
+        scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
+    )
+    google.user_factory.assert_not_called()
+
+
+def test_authorized_user_uses_drive_file_scope_only(app, google):
+    app.config["GSHEETS_CREDENTIALS"] = USER_INFO
+    create_spreadsheet("t", [Tab("a", [["h"]], [])], "u@x.com")
+    google.user_factory.assert_called_once_with(
+        USER_INFO, scopes=["https://www.googleapis.com/auth/drive.file"]
+    )
+    google.service_account_factory.assert_not_called()
+
+
+def test_bad_user_credentials_fail_before_any_drive_call(app, google):
+    app.config["GSHEETS_CREDENTIALS"] = {"type": "authorized_user", "client_id": "c"}
+    google.user_factory.side_effect = ValueError("missing refresh_token")
+    with pytest.raises(GoogleExportError):
+        create_spreadsheet("t", [Tab("a", [["h"]], [])], "u@x.com")
+    assert google.call_order == []

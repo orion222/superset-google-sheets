@@ -1,4 +1,4 @@
-"""Creates and populates spreadsheets in the shared Drive; the only module that talks to Google."""
+"""Creates and populates spreadsheets in Google Drive; the only module that talks to Google."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from google.oauth2 import service_account
+from google.oauth2 import credentials as user_credentials, service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -18,10 +18,11 @@ from .errors import ExportRejected
 
 logger = logging.getLogger(__name__)
 
-SCOPES = [
+SERVICE_ACCOUNT_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+USER_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 MAX_WRITE_BYTES = 2_000_000
 MAX_ATTEMPTS = 5
 RETRYABLE_STATUSES = {429, 500, 503}
@@ -163,13 +164,20 @@ def _trash(drive: Any, file_id: str) -> None:
         logger.exception("Couldn't trash partial spreadsheet %s", file_id)
 
 
+def _credentials(info: dict[str, Any]) -> Any:
+    if info["type"] == "authorized_user":
+        return user_credentials.Credentials.from_authorized_user_info(info, scopes=USER_SCOPES)
+    return service_account.Credentials.from_service_account_info(
+        info, scopes=SERVICE_ACCOUNT_SCOPES
+    )
+
+
 def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
     file_id: str | None = None
     drive: Any = None
     try:
-        credentials = service_account.Credentials.from_service_account_info(
-            credentials_info(), scopes=SCOPES
-        )
+        info = credentials_info()
+        credentials = _credentials(info)
         drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
         sheets = build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
