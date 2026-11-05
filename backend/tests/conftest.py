@@ -23,8 +23,8 @@ _decorators.api = _passthrough_api
 def app():
     flask_app = Flask(__name__)
     flask_app.config.update(
-        GSHEETS_SERVICE_ACCOUNT={"type": "service_account"},
-        GSHEETS_SHARED_DRIVE_FOLDER_ID="folder-1",
+        GSHEETS_CREDENTIALS={"type": "service_account"},
+        GSHEETS_FOLDER_ID="folder-1",
     )
     with flask_app.app_context():
         yield flask_app

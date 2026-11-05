@@ -13,7 +13,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from .cells import CellValue
-from .config import service_account_info, shared_drive_folder_id
+from .config import credentials_info, folder_id
 from .errors import ExportRejected
 
 logger = logging.getLogger(__name__)
@@ -168,7 +168,7 @@ def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
     drive: Any = None
     try:
         credentials = service_account.Credentials.from_service_account_info(
-            service_account_info(), scopes=SCOPES
+            credentials_info(), scopes=SCOPES
         )
         drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
         sheets = build("sheets", "v4", credentials=credentials, cache_discovery=False)
@@ -178,7 +178,7 @@ def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
                 body={
                     "name": title,
                     "mimeType": "application/vnd.google-apps.spreadsheet",
-                    "parents": [shared_drive_folder_id()],
+                    "parents": [folder_id()],
                 },
                 supportsAllDrives=True,
                 fields="id",
