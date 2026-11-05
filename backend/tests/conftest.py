@@ -40,6 +40,7 @@ class FakeGoogle:
         self.sleep_calls: list[float] = []
         self.service_account_factory = MagicMock(name="service_account_factory")
         self.user_factory = MagicMock(name="user_factory")
+        self.about_reply: dict[str, Any] = {"user": {"emailAddress": "owner@gmail.com"}}
         self._failures: dict[str, tuple[int, int]] = {}
         self._wire()
 
@@ -66,6 +67,9 @@ class FakeGoogle:
         files.update.side_effect = lambda **_: self._request("files.update", {})
         self.drive.permissions().create.side_effect = lambda **_: self._request(
             "permissions.create", {}
+        )
+        self.drive.about().get.side_effect = lambda **_: self._request(
+            "about.get", lambda: self.about_reply
         )
         spreadsheets = self.sheets.spreadsheets()
         spreadsheets.batchUpdate.side_effect = lambda spreadsheetId, body: self._request(

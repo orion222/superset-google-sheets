@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from google.auth.exceptions import RefreshError
 from google.oauth2 import credentials as user_credentials, service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -172,6 +173,11 @@ def _credentials(info: dict[str, Any]) -> Any:
     )
 
 
+def _owner_email(drive: Any) -> str | None:
+    reply = _execute(drive.about().get(fields="user(emailAddress)"))
+    return reply.get("user", {}).get("emailAddress")
+
+
 def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
     file_id: str | None = None
     drive: Any = None
@@ -231,16 +237,23 @@ def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
             )
         )
 
-        _execute(
-            drive.permissions().create(
-                fileId=file_id,
-                body={"type": "user", "role": "writer", "emailAddress": share_with},
-                supportsAllDrives=True,
-                sendNotificationEmail=True,
+        owner = _owner_email(drive) if info["type"] == "authorized_user" else None
+        if not (owner and owner.casefold() == share_with.casefold()):
+            _execute(
+                drive.permissions().create(
+                    fileId=file_id,
+                    body={"type": "user", "role": "writer", "emailAddress": share_with},
+                    supportsAllDrives=True,
+                    sendNotificationEmail=True,
+                )
             )
-        )
     except Exception as ex:
         logger.exception("Google Sheets export failed")
+        if isinstance(ex, RefreshError):
+            logger.error(
+                "Google rejected the GSHEETS_CREDENTIALS token; for a personal account, "
+                "re-run scripts/gsheets_personal_setup.py"
+            )
         if file_id is not None:
             _trash(drive, file_id)
         raise GoogleExportError() from ex
