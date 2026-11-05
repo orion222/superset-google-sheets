@@ -1,7 +1,7 @@
 # superset-google-sheets
 An extension of https://github.com/michael-s-molina/superset-extensions/tree/main/sqllab-gsheets
 
-Adds **Export to Google Sheets** to Superset's chart download menus and to SQL Lab. Each export creates a new spreadsheet in a Google Drive folder and shares it with the exporting user. The folder lives in a Shared Drive (service account) or in a personal Google account's Drive.
+Adds **Export to Google Sheets** to Superset's chart download menus and to SQL Lab. Each export creates a new spreadsheet in a Google Drive folder and shares it with the exporting user, unless the exporter is the personal Google account that owns the file. The folder lives in a Shared Drive (service account) or in a personal Google account's Drive.
 
 ## Requirements
 
@@ -38,7 +38,7 @@ Who sees the items:
   - text is never interpreted as a formula.
 - Chart spreadsheets are titled `<chart name> · YYYY-MM-DD HH:mm UTC`. An unsaved chart is titled "Untitled chart".
 - SQL Lab spreadsheets are titled `SQL Lab export · YYYY-MM-DD HH:mm UTC`, with a single `Results` tab.
-- The spreadsheet is shared with the user's Superset account email as an editor.
+- The spreadsheet is shared with the user's Superset account email as an editor, unless that email is the personal Google account that owns the file.
 
 ## Installation
 
@@ -190,7 +190,7 @@ Removing the permission from Gamma or Alpha in the UI does not last: the role sy
 **Upgrading from 1.0.0:**
 
 - SQL Lab export used to require only `read`. It now requires all of the above, so grant them to the roles that already export from SQL Lab.
-- Two config keys were renamed: `GSHEETS_SERVICE_ACCOUNT` is now `GSHEETS_CREDENTIALS`, and `GSHEETS_SHARED_DRIVE_FOLDER_ID` is now `GSHEETS_FOLDER_ID`. The service account JSON itself is unchanged. If only the old keys are set, the extension's error names the rename.
+- Two config keys were renamed: `GSHEETS_SERVICE_ACCOUNT` is now `GSHEETS_CREDENTIALS`, and `GSHEETS_SHARED_DRIVE_FOLDER_ID` is now `GSHEETS_FOLDER_ID`. The service account JSON itself is unchanged. If only the old keys are set, the Superset server log names the rename; the user sees only a generic export error.
 
 ## Limits
 

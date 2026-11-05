@@ -17,7 +17,7 @@ def main() -> None:
     args = parser.parse_args()
 
     flow = InstalledAppFlow.from_client_secrets_file(args.client_secret_json, scopes=SCOPES)
-    creds = flow.run_local_server(port=0)
+    creds = flow.run_local_server(port=0, prompt="consent")
     if not creds.refresh_token:
         sys.exit(
             "No refresh token returned. Revoke the app at "
