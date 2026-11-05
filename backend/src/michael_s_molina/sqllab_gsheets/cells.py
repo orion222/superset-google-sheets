@@ -55,6 +55,8 @@ def to_cell(value: Any, coltype: GenericDataType | None) -> CellValue:
     if isinstance(value, float):
         if math.isnan(value):
             return ""
+        if math.isfinite(value) and coltype is GenericDataType.TEMPORAL:
+            return _serial(_UNIX_EPOCH + timedelta(milliseconds=value))
         return value if math.isfinite(value) else str(value)
     return value if isinstance(value, str) else str(value)
 
