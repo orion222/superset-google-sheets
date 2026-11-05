@@ -57,6 +57,10 @@ Who sees the items:
 
 For more details, see the [deployment documentation](https://superset.apache.org/developer_portal/extensions/deployment).
 
+### Deploying under an application path
+
+The extension supports Superset at the domain root or under a configured path such as `/superset`. API requests use the `common.application_root` value Superset renders in the page's bootstrap data. Frontend chunks load relative to the extension's remote-entry script, preserving the path supplied by Superset's extension loader. No separate extension URL setting is required.
+
 ## Configuration
 
 Add these keys to `superset_config.py`:
