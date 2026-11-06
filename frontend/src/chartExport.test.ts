@@ -34,6 +34,22 @@ test('posts the payload and shows a success toast with the link', async () => {
   expect(toasts.removeToast).toHaveBeenCalledWith('pending-id');
 });
 
+test('posts chartId from the context', async () => {
+  fetchMock.mockResolvedValue(ok({ url: 'u' }));
+  await exportChart({ getPayload: async () => ({}), chartName: 'Sales', chartId: 59, canDownload: true });
+  expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+    payload: {},
+    chartName: 'Sales',
+    chartId: 59,
+  });
+});
+
+test('omits chartId when the context has none', async () => {
+  fetchMock.mockResolvedValue(ok({ url: 'u' }));
+  await exportChart({ getPayload: async () => ({}), chartName: 'Sales', canDownload: true });
+  expect(JSON.parse(fetchMock.mock.calls[0][1].body)).not.toHaveProperty('chartId');
+});
+
 test('pivoted export overrides result_type', async () => {
   fetchMock.mockResolvedValue(ok({ url: 'u' }));
   await exportChart(
