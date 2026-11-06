@@ -58,6 +58,10 @@ Who sees the items:
 
 For more details, see the [deployment documentation](https://superset.apache.org/developer_portal/extensions/deployment).
 
+### Deploying under an application path
+
+The extension supports Superset at the domain root or under a configured path such as `/superset`. API requests use the `common.application_root` value Superset renders in the page's bootstrap data. Frontend chunks load relative to the extension's remote-entry script, preserving the path supplied by Superset's extension loader. No separate extension URL setting is required.
+
 ## Configuration
 
 Add these keys to `superset_config.py`:
@@ -191,6 +195,12 @@ Removing the permission from Gamma or Alpha in the UI does not last: the role sy
 
 - SQL Lab export used to require only `read`. It now requires all of the above, so grant them to the roles that already export from SQL Lab.
 - Two config keys were renamed: `GSHEETS_SERVICE_ACCOUNT` is now `GSHEETS_CREDENTIALS`, and `GSHEETS_SHARED_DRIVE_FOLDER_ID` is now `GSHEETS_FOLDER_ID`. The service account JSON itself is unchanged. If only the old keys are set, the Superset server log names the rename; the user sees only a generic export error.
+
+## Export retries
+
+Each export creates its spreadsheet once, with a private request marker. If Google returns a server error or loses the response, the extension searches for that marked spreadsheet and continues only when it finds exactly one match. An empty, incomplete, or failed search never causes another creation request. If recovery cannot identify the file, the export fails and logs its marker for investigation; an unreturned file can remain in Drive. Separate export clicks still create separate spreadsheets.
+
+Fixed-range value writes, formatting and cleanup retain bounded retries. Tab creation and sharing requests are attempted once; a subsequent failure triggers cleanup of the known spreadsheet. The authenticated HTTP transport also disables implicit retries and redirects, so a lost response cannot silently replay a creation request below the export code.
 
 ## Limits
 

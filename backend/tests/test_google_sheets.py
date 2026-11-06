@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from unittest.mock import ANY
+
 import pytest
 
+from michael_s_molina.sqllab_gsheets.cells import CellValue
 from michael_s_molina.sqllab_gsheets.errors import ExportRejected
 from michael_s_molina.sqllab_gsheets.google_sheets import (
     check_cell_limit,
@@ -21,6 +24,7 @@ def test_creates_in_shared_drive_writes_formats_then_shares_last(app, google):
             "name": "Sales · 2026-11-03 10:00 UTC",
             "mimeType": "application/vnd.google-apps.spreadsheet",
             "parents": ["folder-1"],
+            "appProperties": {"superset_export_id": ANY},
         },
         supportsAllDrives=True,
         fields="id",
@@ -43,9 +47,11 @@ def test_creates_in_shared_drive_writes_formats_then_shares_last(app, google):
 
 def test_first_batch_adds_frozen_tabs_then_deletes_default_sheet(app, google):
     create_spreadsheet("t", [Tab("a", [["h"]], []), Tab("b", [["h"]], [])], "u@x.com")
-    requests = google.sheets.spreadsheets().batchUpdate.call_args_list[0].kwargs["body"][
-        "requests"
-    ]
+    requests = (
+        google.sheets.spreadsheets()
+        .batchUpdate.call_args_list[0]
+        .kwargs["body"]["requests"]
+    )
     assert requests[0]["addSheet"]["properties"] == {
         "title": "a",
         "gridProperties": {"frozenRowCount": 1},
@@ -56,9 +62,11 @@ def test_first_batch_adds_frozen_tabs_then_deletes_default_sheet(app, google):
 
 def test_headers_are_bolded_using_returned_sheet_ids(app, google):
     create_spreadsheet("t", [Tab("a", [["h"]], []), Tab("b", [["h"]], [])], "u@x.com")
-    requests = google.sheets.spreadsheets().batchUpdate.call_args_list[1].kwargs["body"][
-        "requests"
-    ]
+    requests = (
+        google.sheets.spreadsheets()
+        .batchUpdate.call_args_list[1]
+        .kwargs["body"]["requests"]
+    )
     bold = [r["repeatCell"] for r in requests if "textFormat" in str(r)]
     assert [r["range"]["sheetId"] for r in bold] == [100, 101]
     assert bold[0]["range"]["startRowIndex"] == 0
@@ -75,7 +83,10 @@ def test_write_calls_do_not_grow_with_tab_count(app, google):
 
 
 def test_large_payload_splits_value_writes(app, google):
-    big = Tab("1 - big", [["a"]] + [["x" * 1000]] * 3000, [])
+    rows: list[list[CellValue]] = [["a"]]
+    row: list[CellValue] = ["x" * 1000]
+    rows.extend([row] * 3000)
+    big = Tab("1 - big", rows, [])
     create_spreadsheet("t", [big], "u@x.com")
     calls = google.sheets.spreadsheets().values().batchUpdate.call_args_list
     assert len(calls) == 2
@@ -139,12 +150,16 @@ def test_create_failure_raises_export_error_without_trashing(app, google):
 
 def test_date_columns_formatted(app, google):
     create_spreadsheet("t", [Tab("1 - c", [["d"], [46023.0]], [0])], "u@x.com")
-    fmt = google.sheets.spreadsheets().batchUpdate.call_args_list[1].kwargs["body"][
-        "requests"
-    ]
+    fmt = (
+        google.sheets.spreadsheets()
+        .batchUpdate.call_args_list[1]
+        .kwargs["body"]["requests"]
+    )
     assert {
         "numberFormat": {"type": "DATE_TIME", "pattern": "yyyy-mm-dd hh:mm:ss"}
-    } in [r["repeatCell"]["cell"]["userEnteredFormat"] for r in fmt if "repeatCell" in r]
+    } in [
+        r["repeatCell"]["cell"]["userEnteredFormat"] for r in fmt if "repeatCell" in r
+    ]
 
 
 @pytest.mark.parametrize(
@@ -162,7 +177,7 @@ def test_tab_label(cid, name, i, expected):
 
 
 def test_cell_limit_counts_header_rows_across_tabs():
-    wide = [[0] * 1000] * 5000
+    wide: list[list[CellValue]] = [[0] * 1000] * 5000
     check_cell_limit([Tab("a", wide, []), Tab("b", wide, [])])  # exactly 10,000,000
     with pytest.raises(ExportRejected) as e:
         check_cell_limit([Tab("a", wide, []), Tab("b", wide + [[0] * 1000], [])])
@@ -177,14 +192,22 @@ def test_cell_limit_ignores_empty_tabs():
     check_cell_limit([Tab("a", [], [])])
 
 
-USER_INFO = {"type": "authorized_user", "client_id": "c", "client_secret": "s", "refresh_token": "r"}
+USER_INFO = {
+    "type": "authorized_user",
+    "client_id": "c",
+    "client_secret": "s",
+    "refresh_token": "r",
+}
 
 
 def test_service_account_uses_drive_and_sheets_scopes(app, google):
     create_spreadsheet("t", [Tab("a", [["h"]], [])], "u@x.com")
     google.service_account_factory.assert_called_once_with(
         {"type": "service_account"},
-        scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
     )
     google.user_factory.assert_not_called()
 
