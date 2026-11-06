@@ -5,7 +5,7 @@ license = "Apache-2.0"
 description = "Export SQL Lab query results to Google Sheets"
 dependencies = [
     "apache-superset-core>=0.1.0",
-    "google-auth>=2.0.0",
+    "google-auth[requests]>=2.0.0",
     "google-api-python-client>=2.0.0",
     "pandas>=1.0.0",
 ]
