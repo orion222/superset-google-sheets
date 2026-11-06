@@ -148,6 +148,12 @@ Removing the permission from Gamma or Alpha in the UI does not last: the role sy
 
 **Upgrading from 1.0.0:** SQL Lab export used to require only `read`. It now requires all of the above, so grant them to the roles that already export from SQL Lab.
 
+## Export retries
+
+Each export creates its spreadsheet once, with a private request marker. If Google returns a server error or loses the response, the extension searches for that marked spreadsheet and continues only when it finds exactly one match. An empty, incomplete, or failed search never causes another creation request. If recovery cannot identify the file, the export fails and logs its marker for investigation; an unreturned file can remain in Drive. Separate export clicks still create separate spreadsheets.
+
+Fixed-range value writes, formatting and cleanup retain bounded retries. Tab creation and sharing requests are attempted once; a subsequent failure triggers cleanup of the known spreadsheet. The authenticated HTTP transport also disables implicit retries and redirects, so a lost response cannot silently replay a creation request below the export code.
+
 ## Limits
 
 These exports are refused with a "Too large for Google Sheets…" message before any file is created. Use **Export to .CSV** for them.
