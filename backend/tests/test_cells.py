@@ -34,6 +34,16 @@ from michael_s_molina.sqllab_gsheets.cells import (
         ),
         (date(2026, 1, 1), GenericDataType.TEMPORAL, 46023.0),
         (1767268800000, GenericDataType.TEMPORAL, 46023.5),  # epoch ms
+        (1767268800000.0, GenericDataType.TEMPORAL, 46023.5),
+        (np.float64(1767268800000), GenericDataType.TEMPORAL, 46023.5),
+        (0.0, GenericDataType.TEMPORAL, 25569.0),
+        (-43200000.0, GenericDataType.TEMPORAL, 25568.5),
+        (0.5, GenericDataType.TEMPORAL, 25569 + 0.5 / 86400000),
+        (float("nan"), GenericDataType.TEMPORAL, ""),
+        (float("inf"), GenericDataType.TEMPORAL, "inf"),
+        (float("-inf"), GenericDataType.TEMPORAL, "-inf"),
+        (1767268800000.0, GenericDataType.NUMERIC, 1767268800000.0),
+        (1767268800000.0, None, 1767268800000.0),
         ("=SUM(A1)", GenericDataType.STRING, "=SUM(A1)"),  # RAW input: never a formula
         (Decimal("1.25"), GenericDataType.NUMERIC, 1.25),
         (Decimal("9007199254740993"), GenericDataType.NUMERIC, "9007199254740993"),
@@ -82,6 +92,22 @@ def test_query_rows_header_then_values_in_column_order():
         [{"a": "x", "b": 1}],
     )
     assert query_rows(result) == [["b", "a"], [1, "x"]]
+
+
+def test_query_rows_nullable_epoch_milliseconds_stay_dates() -> None:
+    """A null promotes epoch milliseconds to floats without changing their meaning."""
+    df = pd.DataFrame({"d": [1767268800000, None], "n": [1.5, 2.5]})
+    result = ChartQueryResult(
+        ["d", "n"],
+        [GenericDataType.TEMPORAL, GenericDataType.NUMERIC],
+        [
+            {"d": timestamp, "n": number}
+            for timestamp, number in df.itertuples(index=False, name=None)
+        ],
+    )
+
+    assert query_rows(result) == [["d", "n"], [46023.5, 1.5], ["", 2.5]]
+    assert temporal_columns(result) == [0]
 
 
 def test_temporal_columns():
