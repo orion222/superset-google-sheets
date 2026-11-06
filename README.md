@@ -210,7 +210,7 @@ With Docker Compose instead: the dev config already turns on `ENABLE_EXTENSIONS`
 - A pivot table also shows **Export pivoted to Google Sheets**.
 - The item also appears in:
   - a dashboard chart's **Download** menu;
-  - the standalone chart view (`?standalone=1`);
+  - the standalone chart view with its download control (`?standalone=1&show_download=true`);
   - **Drill to Detail**;
   - **Drill By**;
   - SQL Lab's editor menu.
