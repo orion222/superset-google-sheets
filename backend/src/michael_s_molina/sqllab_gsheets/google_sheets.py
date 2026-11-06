@@ -1,4 +1,4 @@
-"""Creates and populates spreadsheets in the shared Drive; the only module that talks to Google."""
+"""Creates and populates spreadsheets in Google Drive; the only module that talks to Google."""
 
 from __future__ import annotations
 
@@ -9,23 +9,24 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
-from google.auth.exceptions import TransportError
-from google.oauth2 import service_account
+from google.auth.exceptions import RefreshError, TransportError
+from google.oauth2 import credentials as user_credentials, service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from httplib2 import HttpLib2Error
 
 from .cells import CellValue
-from .config import service_account_info, shared_drive_folder_id
+from .config import credentials_info, folder_id
 from .errors import ExportRejected
 from .google_http import GoogleHttp
 
 logger = logging.getLogger(__name__)
 
-SCOPES = [
+SERVICE_ACCOUNT_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+USER_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 MAX_WRITE_BYTES = 2_000_000
 MAX_ATTEMPTS = 5
 RETRYABLE_STATUSES = {429, 500, 503}
@@ -255,19 +256,33 @@ def _trash(drive: Any, file_id: str) -> None:
         logger.exception("Couldn't trash partial spreadsheet %s", file_id)
 
 
+def _credentials(info: dict[str, Any]) -> Any:
+    if info["type"] == "authorized_user":
+        return user_credentials.Credentials.from_authorized_user_info(
+            info, scopes=USER_SCOPES
+        )
+    return service_account.Credentials.from_service_account_info(
+        info, scopes=SERVICE_ACCOUNT_SCOPES
+    )
+
+
+def _owner_email(drive: Any) -> str | None:
+    reply = _execute(drive.about().get(fields="user(emailAddress)"))
+    return reply.get("user", {}).get("emailAddress")
+
+
 def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
     file_id: str | None = None
     drive: Any = None
     http: GoogleHttp | None = None
     try:
-        credentials = service_account.Credentials.from_service_account_info(
-            service_account_info(), scopes=SCOPES
-        )
+        info = credentials_info()
+        credentials = _credentials(info)
         http = GoogleHttp(credentials)
         drive = build("drive", "v3", http=http, cache_discovery=False)
         sheets = build("sheets", "v4", http=http, cache_discovery=False)
 
-        file_id = _create_file(drive, title, shared_drive_folder_id())
+        file_id = _create_file(drive, title, folder_id())
 
         structure = [
             {
@@ -309,16 +324,23 @@ def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
             retry_safe=True,
         )
 
-        _execute(
-            drive.permissions().create(
-                fileId=file_id,
-                body={"type": "user", "role": "writer", "emailAddress": share_with},
-                supportsAllDrives=True,
-                sendNotificationEmail=True,
+        owner = _owner_email(drive) if info["type"] == "authorized_user" else None
+        if not (owner and owner.casefold() == share_with.casefold()):
+            _execute(
+                drive.permissions().create(
+                    fileId=file_id,
+                    body={"type": "user", "role": "writer", "emailAddress": share_with},
+                    supportsAllDrives=True,
+                    sendNotificationEmail=True,
+                )
             )
-        )
     except Exception as ex:
         logger.exception("Google Sheets export failed")
+        if isinstance(ex, RefreshError):
+            logger.error(
+                "Google rejected the GSHEETS_CREDENTIALS token; for a personal account, "
+                "re-run scripts/gsheets_personal_setup.py"
+            )
         if file_id is not None:
             _trash(drive, file_id)
         raise GoogleExportError() from ex
