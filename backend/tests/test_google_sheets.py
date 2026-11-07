@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import ANY
 
 import pytest
+from flask import Flask
 
 from michael_s_molina.sqllab_gsheets.cells import CellValue
 from michael_s_molina.sqllab_gsheets.errors import ExportRejected
@@ -73,6 +75,42 @@ def test_tab_grids_match_the_data_cell_budget(app, google):
         "rowCount": 3,
         "columnCount": 2,
     }
+
+
+@pytest.mark.parametrize("after_data_tab", [False, True])
+def test_header_only_temporal_tabs_keep_format_ranges_within_grid(
+    app: Flask, google: Any, after_data_tab: bool
+) -> None:
+    """A query with no records must never format a row outside its allocated grid."""
+    tabs = [Tab("No rows", [["timestamp"]], [0])]
+    if after_data_tab:
+        tabs.insert(0, Tab("Data", [["value"], [123]], []))
+    create_spreadsheet("t", tabs, "u@x.com")
+
+    calls = google.sheets.spreadsheets().batchUpdate.call_args_list
+    grids: dict[int, dict[str, int]] = {}
+    for request in calls[0].kwargs["body"]["requests"]:
+        if "updateSheetProperties" in request:
+            properties = request["updateSheetProperties"]["properties"]
+            sheet_id = properties["sheetId"]
+        else:
+            properties = request["addSheet"]["properties"]
+            sheet_id = 100 + len(grids) - 1
+        grids[sheet_id] = properties["gridProperties"]
+
+    format_requests = calls[1].kwargs["body"]["requests"]
+    bold_headers = [
+        request["repeatCell"]["range"]["sheetId"]
+        for request in format_requests
+        if request["repeatCell"]["cell"].get("userEnteredFormat")
+        == {"textFormat": {"bold": True}}
+    ]
+    assert set(bold_headers) == set(grids)
+    for request in format_requests:
+        area = request["repeatCell"]["range"]
+        grid = grids[area["sheetId"]]
+        assert area.get("startRowIndex", 0) < grid["rowCount"]
+        assert area.get("startColumnIndex", 0) < grid["columnCount"]
 
 
 @pytest.mark.parametrize("phase", ["create", "structure", "values", "format", "share"])

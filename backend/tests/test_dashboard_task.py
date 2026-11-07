@@ -26,7 +26,8 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from flask import Flask, g
+from flask import Flask, g, has_request_context
+from flask_appbuilder.security.manager import BaseSecurityManager
 from michael_s_molina.sqllab_gsheets import dashboard_task as worker
 from michael_s_molina.sqllab_gsheets.google_sheets import Tab
 from superset_core.exports.types import (
@@ -108,7 +109,7 @@ def m(app: Flask, monkeypatch: pytest.MonkeyPatch) -> _Mocks:
     data_permission = MagicMock(return_value=True)
     dashboard_permission = MagicMock(return_value=True)
     setattr(
-        app, "appbuilder", SimpleNamespace(sm=SimpleNamespace(has_access=permission))
+        app, "appbuilder", SimpleNamespace(sm=SimpleNamespace(can_access=permission))
     )
     user_ids: list[int] = []
     g.user = SimpleNamespace(id=99, email="previous@x.com")
@@ -181,6 +182,22 @@ def test_worker_is_private_and_runs_as_requester_with_live_filter_state(
         "exported_tabs": 1,
         "skipped_charts": [],
     }
+
+
+def test_worker_checks_permissions_without_an_http_request(
+    app: Flask, m: _Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Celery has an app context but no Flask-Login request principal."""
+    sm = object.__new__(BaseSecurityManager)
+    setattr(sm, "can_access", m.permission)
+    monkeypatch.setattr(app, "appbuilder", SimpleNamespace(sm=sm))
+    assert not has_request_context()
+
+    worker.run_dashboard_export(4, {}, 42)
+
+    m.permission.assert_called_with("can_export", "GoogleSheets")
+    assert m.context.payload["url"] == m.create.return_value
+    assert g.user.id == 99
 
 
 @pytest.mark.parametrize(

@@ -51,6 +51,7 @@ const TASK_STATUSES: TaskResult['status'][] = [
 export class TaskPollingCancelled extends Error {
   constructor() {
     super('Task polling cancelled');
+    Object.setPrototypeOf(this, new.target.prototype);
     this.name = 'AbortError';
   }
 }

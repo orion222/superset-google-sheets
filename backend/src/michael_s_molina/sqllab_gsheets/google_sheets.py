@@ -31,7 +31,7 @@ USER_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 MAX_WRITE_BYTES = 2_000_000
 MAX_ATTEMPTS = 5
 RETRYABLE_STATUSES = {429, 500, 503}
-# Google's per-spreadsheet cell limit.
+# Export cell budget shared by SQL Lab, chart and dashboard exports.
 MAX_CELLS = 10_000_000
 DATE_FORMAT = {"type": "DATE_TIME", "pattern": "yyyy-mm-dd hh:mm:ss"}
 # Sheet ID Google assigns to the tab every new spreadsheet starts with.
@@ -227,6 +227,8 @@ def _format_requests(tabs: list[Tab], sheet_ids: list[int]) -> list[dict[str, An
                 }
             }
         )
+        if len(tab.rows) <= 1:
+            continue
         for column in tab.temporal_columns:
             requests.append(
                 {

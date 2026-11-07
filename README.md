@@ -67,7 +67,7 @@ Users need the extension and data export permissions below, dashboard export per
 
 ### Limits and failures
 
-The dashboard budget includes chart header rows and the About tab within Google's 10,000,000-cell limit. Charts that fail or would exceed the remaining budget are skipped as a whole and recorded in About. If every chart is skipped, the task fails without creating a spreadsheet. The synchronous row cap applies to individual chart and SQL Lab exports; dashboard exports use the shared cell budget and worker timeout.
+The dashboard budget includes chart header rows and the About tab within the extension's 10,000,000-cell budget. Charts that fail or would exceed the remaining budget are skipped as a whole and recorded in About. If every chart is skipped, the task fails without creating a spreadsheet. The synchronous row cap applies to individual chart and SQL Lab exports; dashboard exports use the shared cell budget and worker timeout.
 
 Use Superset's task list to cancel an export. Cancellation and timeout are cooperative: the worker checks between charts and Google write phases, then trashes a known incomplete spreadsheet. Google errors also trigger cleanup, and sharing occurs only after all tabs are written. Cancellation arriving after writing completes can leave a completed spreadsheet URL in a cancelled task; inspect its result before retrying. A hard-stopped worker or an unresolved file-creation response can leave a partial file for operational cleanup. Reopening the page does not automatically resume completion toasts; the task list retains the result.
 
@@ -235,11 +235,13 @@ Fixed-range value writes, formatting and cleanup retain bounded retries. Tab cre
 
 ## Limits
 
-These exports are refused with a "Too large for Google Sheets…" message before any file is created. Use **Export to .CSV** for them.
+Individual chart and SQL Lab exports are refused with a "Too large for Google Sheets…" message before any file is created. Use **Export to .CSV** for them. Dashboard exports skip charts that exceed the remaining budget.
 
 - A chart export with more than `GSHEETS_EXPORT_SYNC_MAX_ROWS` rows, counted across all its queries.
 - A SQL Lab export with more than `GSHEETS_EXPORT_SYNC_MAX_ROWS` rows, or with `SQL_MAX_ROW` rows or more when Superset's `SQL_MAX_ROW` is set. A result that reaches `SQL_MAX_ROW` may have been cut short by Superset, so it is refused rather than exported truncated. With both at their default of 100,000, the most a SQL Lab export takes is 99,999 rows.
-- Any export over Google's limit of 10,000,000 cells per spreadsheet, counted as rows (including the header row) times columns, summed over tabs.
+- Any export over the extension's budget of 10,000,000 cells per spreadsheet, counted as rows (including the header row) times columns, summed over tabs.
+
+The extension keeps a conservative 10,000,000-cell budget. See [Google's documentation](https://support.google.com/drive/answer/37603?hl=en) for the service's published limits.
 
 ## Development
 

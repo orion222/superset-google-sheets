@@ -92,7 +92,7 @@ def _require_access(dashboard_id: int) -> str:
     email = getattr(g.user, "email", None)
     if (
         not email
-        or not sm.has_access("can_export", "GoogleSheets")
+        or not sm.can_access("can_export", "GoogleSheets")
         or not can_export_data()
         or not can_export_dashboard(dashboard_id)
     ):
