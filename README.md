@@ -1,7 +1,7 @@
 # superset-google-sheets
 An extension of https://github.com/michael-s-molina/superset-extensions/tree/main/sqllab-gsheets
 
-Adds **Export to Google Sheets** to Superset's chart download menus and to SQL Lab. Each export creates a new spreadsheet in a Google Drive folder and shares it with the exporting user, unless the exporter is the personal Google account that owns the file. The folder lives in a Shared Drive (service account) or in a personal Google account's Drive.
+Adds **Export to Google Sheets** to Superset's chart and dashboard download menus and to SQL Lab. Each export creates a new spreadsheet in a Google Drive folder and shares it with the exporting user, unless the exporter is the personal Google account that owns the file. The folder lives in a Shared Drive (service account) or in a personal Google account's Drive.
 
 ## Requirements
 
@@ -20,12 +20,14 @@ The **Export to Google Sheets** item appears in:
 - **Drill to Detail**.
 - **Drill By**.
 - SQL Lab's editor menu.
+- The dashboard's main **Download** menu, when background tasks are enabled.
 
 Who sees the items:
 
 - **Hidden** for users without the `can export on GoogleSheets` permission or without an email address on their Superset account. The frontend registers the items only after `GET /extensions/michael-s-molina/sqllab-gsheets/chart/capabilities` succeeds and reports `can_export`.
 - **Disabled** in the chart menus for users without `can_csv` (or `can_export_data` when `GRANULAR_EXPORT_CONTROLS` is on), like Superset's own download items.
 - The SQL Lab item is never disabled. For a user who lacks a required permission, the export fails with a permission error.
+- The dashboard item also needs `can read on Task` and background tasks. Its host menu disables downloads when dashboard export is not permitted.
 
 ## What gets exported
 
@@ -39,6 +41,35 @@ Who sees the items:
 - Chart spreadsheets are titled `<chart name> · YYYY-MM-DD HH:mm UTC`. An unsaved chart is titled "Untitled chart".
 - SQL Lab spreadsheets are titled `SQL Lab export · YYYY-MM-DD HH:mm UTC`, with a single `Results` tab.
 - The spreadsheet is shared with the user's Superset account email as an editor, unless that email is the personal Google account that owns the file.
+
+## Dashboard exports
+
+Open the dashboard's main **Download** menu and choose **Export to Google Sheets**. The export runs in a background task, and a completion toast provides the spreadsheet link. The sheet contains chart query data in dashboard layout order, with one tab per query and an **About** tab containing the dashboard permalink, export time, applied native filters, chart links and skipped-chart reasons.
+
+The active native filters are copied when the export starts. Each filter retains its chart scope, and cleared filters stay cleared. Superset's dashboard export API applies native filters; cross-filters are excluded. Queries run as the requesting Superset user, with access and row-level security checked in the worker. Data comes from saved dashboard charts; results retain the host export API's query limits.
+
+Repeated clicks with the same user, dashboard and filter values join the running task. Different filter values start a separate export. After a task finishes, another click starts a new export. Browser polling starts every five seconds, slows to 15 seconds after one minute and 30 seconds after five minutes, backs off after transient failures, and pauses while the browser tab is hidden. After 30 minutes, the browser stops waiting and directs the user to the task list. Closing the page also stops browser polling; the task remains available in Superset's task list.
+
+### Worker setup
+
+Enable the Global Task Framework in `superset_config.py`:
+
+```python
+FEATURE_FLAGS = {
+    "GLOBAL_TASK_FRAMEWORK": True,
+}
+GSHEETS_EXPORT_TIMEOUT_SECONDS = 900
+```
+
+Configure the broker, result/cache backend and Celery worker according to [Superset's task documentation](https://superset.apache.org/developer_portal/extensions/tasks). Install the same extension bundle and Google credentials/folder configuration on both the web server and worker, then restart both. The dashboard command is hidden when the task feature is disabled; enabling the feature does not verify that a worker is online.
+
+Users need the extension and data export permissions below, dashboard export permission and access to that dashboard, plus `can read on Task` to observe the result. The worker rechecks the user's export and dashboard permissions before reading data. Tasks are private to the requester.
+
+### Limits and failures
+
+The dashboard budget includes chart header rows and the About tab within the extension's 10,000,000-cell budget. Charts that fail or would exceed the remaining budget are skipped as a whole and recorded in About. If every chart is skipped, the task fails without creating a spreadsheet. The synchronous row cap applies to individual chart and SQL Lab exports; dashboard exports use the shared cell budget and worker timeout.
+
+Use Superset's task list to cancel an export. Cancellation and timeout are cooperative: the worker checks between charts and Google write phases, then trashes a known incomplete spreadsheet. Google errors also trigger cleanup, and sharing occurs only after all tabs are written. Cancellation arriving after writing completes can leave a completed spreadsheet URL in a cancelled task; inspect its result before retrying. A hard-stopped worker or an unresolved file-creation response can leave a partial file for operational cleanup. Reopening the page does not automatically resume completion toasts; the task list retains the result.
 
 ## Installation
 
@@ -71,7 +102,7 @@ Add these keys to `superset_config.py`:
 | `GSHEETS_CREDENTIALS` | required. `"type"` is `"service_account"` or `"authorized_user"` |
 | `GSHEETS_FOLDER_ID` | required. The Shared Drive folder (service account) or the script-created folder (personal account) |
 | `GSHEETS_EXPORT_SYNC_MAX_ROWS` | `100_000` |
-| `GSHEETS_EXPORT_TIMEOUT_SECONDS` | `900` (used by dashboard exports, coming in 1.2.0) |
+| `GSHEETS_EXPORT_TIMEOUT_SECONDS` | `900` (positive integer; dashboard task timeout in seconds) |
 
 Pick one credential option.
 
@@ -198,17 +229,19 @@ Removing the permission from Gamma or Alpha in the UI does not last: the role sy
 
 ## Export retries
 
-Each export creates its spreadsheet once, with a private request marker. If Google returns a server error or loses the response, the extension searches for that marked spreadsheet and continues only when it finds exactly one match. An empty, incomplete, or failed search never causes another creation request. If recovery cannot identify the file, the export fails and logs its marker for investigation; an unreturned file can remain in Drive. Separate export clicks still create separate spreadsheets.
+Each export creates its spreadsheet once, with a private request marker. If Google returns a server error or loses the response, the extension searches for that marked spreadsheet and continues only when it finds exactly one match. An empty, incomplete, or failed search never causes another creation request. If recovery cannot identify the file, the export fails and logs its marker for investigation; an unreturned file can remain in Drive. Separate chart and SQL Lab export clicks create separate spreadsheets; matching dashboard clicks join an active task.
 
 Fixed-range value writes, formatting and cleanup retain bounded retries. Tab creation and sharing requests are attempted once; a subsequent failure triggers cleanup of the known spreadsheet. The authenticated HTTP transport also disables implicit retries and redirects, so a lost response cannot silently replay a creation request below the export code.
 
 ## Limits
 
-These exports are refused with a "Too large for Google Sheets…" message before any file is created. Use **Export to .CSV** for them.
+Individual chart and SQL Lab exports are refused with a "Too large for Google Sheets…" message before any file is created. Use **Export to .CSV** for them. Dashboard exports skip charts that exceed the remaining budget.
 
 - A chart export with more than `GSHEETS_EXPORT_SYNC_MAX_ROWS` rows, counted across all its queries.
 - A SQL Lab export with more than `GSHEETS_EXPORT_SYNC_MAX_ROWS` rows, or with `SQL_MAX_ROW` rows or more when Superset's `SQL_MAX_ROW` is set. A result that reaches `SQL_MAX_ROW` may have been cut short by Superset, so it is refused rather than exported truncated. With both at their default of 100,000, the most a SQL Lab export takes is 99,999 rows.
-- Any export over Google's limit of 10,000,000 cells per spreadsheet, counted as rows (including the header row) times columns, summed over tabs.
+- Any export over the extension's budget of 10,000,000 cells per spreadsheet, counted as rows (including the header row) times columns, summed over tabs.
+
+The extension keeps a conservative 10,000,000-cell budget. See [Google's documentation](https://support.google.com/drive/answer/37603?hl=en) for the service's published limits.
 
 ## Development
 
