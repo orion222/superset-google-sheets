@@ -109,9 +109,11 @@ test.each([
     const commands = { registerCommand: jest.fn() };
     const menus = { registerMenuItem: jest.fn() };
     const fetchMock = jest.fn(async (url: string) => ({
-      ok:
-        url ===
-        `${prefix}/extensions/michael-s-molina/sqllab-gsheets/chart/capabilities`,
+      ok: ['chart', 'dashboard'].some(
+        surface =>
+          url ===
+          `${prefix}/extensions/michael-s-molina/sqllab-gsheets/${surface}/capabilities`,
+      ),
       status: 200,
       json: async () => ({ can_export: true }),
     }));
@@ -230,7 +232,11 @@ test.each([
       `${prefix}/extensions/michael-s-molina/sqllab-gsheets/chart/capabilities`,
       { method: 'GET' },
     );
-    expect(commands.registerCommand).toHaveBeenCalledTimes(3);
-    expect(menus.registerMenuItem).toHaveBeenCalledTimes(8);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${prefix}/extensions/michael-s-molina/sqllab-gsheets/dashboard/capabilities`,
+      { method: 'GET' },
+    );
+    expect(commands.registerCommand).toHaveBeenCalledTimes(4);
+    expect(menus.registerMenuItem).toHaveBeenCalledTimes(9);
   },
 );
