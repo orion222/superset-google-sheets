@@ -19,7 +19,11 @@ export async function exportChart(
     }
     const { url } = await postJson<{ url: string }>(
       `${EXTENSION_BASE}/chart/`,
-      { payload, chartName: ctx.chartName },
+      {
+        payload,
+        chartName: ctx.chartName,
+        chartId: ctx.chartId,
+      },
     );
     toasts.addSuccessToast('Sent to Google Sheets', {
       duration: 0,

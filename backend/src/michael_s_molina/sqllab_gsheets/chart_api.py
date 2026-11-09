@@ -52,6 +52,13 @@ def _run(payload: dict[str, Any]) -> list[Any]:
         raise ExportRejected(500, GENERIC_FAILURE) from ex
 
 
+def _chart_id(value: Any) -> int | None:
+    # Chart IDs only label tabs, so unusable values have no identity.
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
 def _validate(payload: Any, chart_name: Any) -> None:
     form_data = payload.get("form_data") if isinstance(payload, dict) else None
     valid = (
@@ -64,8 +71,11 @@ def _validate(payload: Any, chart_name: Any) -> None:
         raise ExportRejected(400, INVALID_REQUEST)
 
 
-def _tabs(payload: dict[str, Any], name: str, results: list[Any]) -> list[Tab]:
-    chart_id = (payload.get("form_data") or {}).get("slice_id")
+def _tabs(
+    payload: dict[str, Any], name: str, results: list[Any], chart_id: int | None
+) -> list[Tab]:
+    # Drill surfaces send no `slice_id`, or `0`, so the host's chart ID comes first.
+    chart_id = chart_id or (payload.get("form_data") or {}).get("slice_id")
     used: set[str] = set()
     return [
         Tab(
@@ -82,6 +92,7 @@ def export_chart(
     chart_name: Any,
     email: str | None,
     now: datetime,
+    chart_id: Any = None,
 ) -> str:
     if not email or not can_export_data():
         raise ExportRejected(403, "You don't have permission to export to Google Sheets.")
@@ -102,7 +113,7 @@ def export_chart(
     title = f"{name} · {now.strftime('%Y-%m-%d %H:%M')} UTC"
 
     try:
-        tabs = _tabs(payload, name, results)
+        tabs = _tabs(payload, name, results, _chart_id(chart_id))
     except Exception as ex:
         logger.exception("Couldn't build Google Sheets tabs for the chart")
         raise ExportRejected(500, GENERIC_FAILURE) from ex
@@ -128,6 +139,7 @@ class ChartExportAPI(RestApi):
         Request body:
             payload: The chart's query context, as sent to /api/v1/chart/data
             chartName: Name used for the spreadsheet title and tabs
+            chartId: Optional ID of the saved chart, used to prefix tab names
         """
         try:
             body = request.get_json(silent=True)
@@ -138,6 +150,7 @@ class ChartExportAPI(RestApi):
                 body.get("chartName"),
                 g.user.email,
                 datetime.now(timezone.utc),
+                chart_id=body.get("chartId"),
             )
         except ExportRejected as ex:
             return self.response(ex.status, message=ex.message)
