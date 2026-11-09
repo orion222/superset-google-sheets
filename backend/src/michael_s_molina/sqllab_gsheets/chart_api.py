@@ -150,7 +150,7 @@ class ChartExportAPI(RestApi):
                 body.get("chartName"),
                 g.user.email,
                 datetime.now(timezone.utc),
-                body.get("chartId"),
+                chart_id=body.get("chartId"),
             )
         except ExportRejected as ex:
             return self.response(ex.status, message=ex.message)

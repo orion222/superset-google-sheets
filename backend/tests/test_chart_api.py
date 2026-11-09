@@ -187,6 +187,28 @@ def test_endpoint_malformed_body_is_400(app, kwargs):
     export.assert_not_called()
 
 
+def test_endpoint_uses_chart_id_for_tab_name(app, m):
+    api = ChartExportAPI()
+    api.response = lambda status, **kw: (status, kw)
+    endpoint = inspect.unwrap(ChartExportAPI.export_to_sheets)
+    with (
+        app.test_request_context(
+            method="POST",
+            json={
+                "payload": {"form_data": {"slice_id": 7}},
+                "chartName": "Sales",
+                "chartId": 59,
+            },
+        ),
+        patch(f"{MODULE}.g", MagicMock(user=MagicMock(email="u@x.com"))),
+    ):
+        assert endpoint(api) == (
+            200,
+            {"url": "https://docs.google.com/spreadsheets/d/f/edit"},
+        )
+    assert [t.name for t in m.create_spreadsheet.call_args.args[1]] == ["59 - Sales"]
+
+
 def test_google_failure_is_generic_500(app, m):
     m.create_spreadsheet.side_effect = GoogleExportError()
     with pytest.raises(ExportRejected) as e:
