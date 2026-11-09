@@ -22,7 +22,7 @@ export async function exportChart(
       {
         payload,
         chartName: ctx.chartName,
-        ...(ctx.chartId !== undefined && { chartId: ctx.chartId }),
+        chartId: ctx.chartId,
       },
     );
     toasts.addSuccessToast('Sent to Google Sheets', {
