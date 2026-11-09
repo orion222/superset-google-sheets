@@ -69,9 +69,11 @@ def test_chart_id_prefixes_drill_tabs(app, m):
     assert [t.name for t in m.create_spreadsheet.call_args.args[1]] == ["59 - Sales"]
 
 
-def test_chart_id_falls_back_to_form_data(app, m):
-    export_chart({"form_data": {"slice_id": 7}}, "Sales", "u@x.com", NOW)
-    assert [t.name for t in m.create_spreadsheet.call_args.args[1]] == ["7 - Sales"]
+def test_chart_id_precedes_form_data_slice_id(app, m):
+    export_chart(
+        {"form_data": {"slice_id": 7}}, "Sales", "u@x.com", NOW, chart_id=59
+    )
+    assert [t.name for t in m.create_spreadsheet.call_args.args[1]] == ["59 - Sales"]
 
 
 @pytest.mark.parametrize("chart_id", ["59", True, -1, 0, 0.5])
