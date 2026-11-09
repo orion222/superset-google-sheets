@@ -1,6 +1,6 @@
-import { toasts } from '@apache-superset/core';
-import { ChartDownloadContext } from './coreTypes';
-import { EXTENSION_BASE, postJson } from './client';
+import type { ChartDownloadContext } from '@apache-superset/core';
+import { postJson } from './client';
+import { runExport } from './exportFlow';
 
 export type ChartResultType = 'full' | 'post_processed';
 
@@ -9,27 +9,15 @@ export async function exportChart(
   ctx: ChartDownloadContext,
   resultType?: ChartResultType,
 ): Promise<void> {
-  const pendingId = toasts.addInfoToast('Sending to Google Sheets…', {
-    duration: 0,
-  });
-  try {
-    const payload = await ctx.getPayload();
-    if (resultType) {
-      payload.result_type = resultType;
-    }
-    const { url } = await postJson<{ url: string }>(
-      `${EXTENSION_BASE}/chart/`,
-      { payload, chartName: ctx.chartName },
-    );
-    toasts.addSuccessToast('Sent to Google Sheets', {
-      duration: 0,
-      link: { href: url, label: 'Open in Google Sheets' },
+  await runExport('Sending to Google Sheets…', async () => {
+    const sourcePayload = await ctx.getPayload();
+    const payload = resultType
+      ? { ...sourcePayload, result_type: resultType }
+      : sourcePayload;
+    const data = await postJson<{ spreadsheet_url: string }>('/chart/', {
+      payload,
+      chartName: ctx.chartName,
     });
-  } catch (error) {
-    toasts.addDangerToast(
-      error instanceof Error && error.message ? error.message : 'Export failed',
-    );
-  } finally {
-    toasts.removeToast(pendingId);
-  }
+    return { ...data, message: 'Sent to Google Sheets' };
+  });
 }

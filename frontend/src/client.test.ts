@@ -16,14 +16,23 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { authentication } from '@apache-superset/core';
-import { EXTENSION_BASE, getJson, postJson } from './client';
+import { mockFetch } from '../test/httpMock';
 
-const fetchMock = jest.fn<
-  Promise<Pick<Response, 'ok' | 'status' | 'json'>>,
-  Parameters<typeof fetch>
->();
-const originalFetch = global.fetch;
+const fetchMock = mockFetch();
+
+async function loadClient(): Promise<{
+  client: typeof import('./client');
+  authentication: typeof import('@apache-superset/core').authentication;
+}> {
+  let client!: typeof import('./client');
+  let authentication!: typeof import('@apache-superset/core').authentication;
+  await jest.isolateModulesAsync(async () => {
+    const core = await import('@apache-superset/core');
+    client = await import('./client');
+    authentication = core.authentication;
+  });
+  return { client, authentication };
+}
 
 function setBootstrap(value: unknown): void {
   const app = document.createElement('div');
@@ -37,16 +46,11 @@ beforeEach(() => {
   document.body.replaceChildren();
   // The active route is unrelated to the operator's configured application path.
   window.history.replaceState(null, '', '/unrelated/explore/');
-  global.fetch = fetchMock as unknown as typeof fetch;
   fetchMock.mockResolvedValue({
     ok: true,
     status: 200,
     json: async () => ({ can_export: true }),
   });
-});
-
-afterAll(() => {
-  global.fetch = originalFetch;
 });
 
 test.each([
@@ -55,22 +59,24 @@ test.each([
   ['/superset', '/superset'],
   ['/superset/', '/superset'],
   ['/team/analytics', '/team/analytics'],
+  ['/extensions', '/extensions'],
 ])('GET and POST respect application_root %j', async (root, prefix) => {
   setBootstrap({ common: { application_root: root } });
+  const { client, authentication } = await loadClient();
 
   await expect(
-    getJson(`${EXTENSION_BASE}/chart/capabilities`),
+    client.getJson('/chart/capabilities'),
   ).resolves.toEqual({ can_export: true });
   expect(fetchMock).toHaveBeenLastCalledWith(
-    `${prefix}${EXTENSION_BASE}/chart/capabilities`,
+    `${prefix}/extensions/michael-s-molina/sqllab-gsheets/chart/capabilities`,
     { method: 'GET' },
   );
 
   const body = { payload: { queries: [] }, chartName: 'Sales' };
-  await postJson(`${EXTENSION_BASE}/chart/`, body);
+  await client.postJson('/chart/', body);
   expect(authentication.getCSRFToken).toHaveBeenCalledTimes(1);
   expect(fetchMock).toHaveBeenLastCalledWith(
-    `${prefix}${EXTENSION_BASE}/chart/`,
+    `${prefix}/extensions/michael-s-molina/sqllab-gsheets/chart/`,
     {
       method: 'POST',
       headers: {
@@ -84,26 +90,19 @@ test.each([
 
 test('SQL Lab exports use the configured application path', async () => {
   setBootstrap({ common: { application_root: '/superset' } });
-  await postJson(`${EXTENSION_BASE}/export/`, { sql: 'SELECT 1' });
+  const { client } = await loadClient();
+  await client.postJson('/export/', { sql: 'SELECT 1' });
   expect(fetchMock).toHaveBeenLastCalledWith(
-    `/superset${EXTENSION_BASE}/export/`,
+    '/superset/extensions/michael-s-molina/sqllab-gsheets/export/',
     expect.objectContaining({ method: 'POST' }),
   );
 });
 
-test('an already prefixed URL is not prefixed twice', async () => {
-  setBootstrap({ common: { application_root: '/superset' } });
-  await getJson(`/superset${EXTENSION_BASE}/chart/capabilities`);
-  expect(fetchMock).toHaveBeenLastCalledWith(
-    `/superset${EXTENSION_BASE}/chart/capabilities`,
-    { method: 'GET' },
-  );
-});
-
 test('a missing bootstrap keeps root deployment URLs', async () => {
-  await getJson(`${EXTENSION_BASE}/chart/capabilities`);
+  const { client } = await loadClient();
+  await client.getJson('/chart/capabilities');
   expect(fetchMock).toHaveBeenLastCalledWith(
-    `${EXTENSION_BASE}/chart/capabilities`,
+    '/extensions/michael-s-molina/sqllab-gsheets/chart/capabilities',
     { method: 'GET' },
   );
 });
@@ -118,9 +117,10 @@ test.each([
   { common: { application_root: '/superset/..' } },
 ])('invalid or absent application_root falls back to root: %j', async value => {
   setBootstrap(value);
-  await getJson(`${EXTENSION_BASE}/chart/capabilities`);
+  const { client } = await loadClient();
+  await client.getJson('/chart/capabilities');
   expect(fetchMock).toHaveBeenLastCalledWith(
-    `${EXTENSION_BASE}/chart/capabilities`,
+    '/extensions/michael-s-molina/sqllab-gsheets/chart/capabilities',
     { method: 'GET' },
   );
 });
@@ -128,9 +128,10 @@ test.each([
 test('malformed bootstrap JSON keeps root deployment URLs', async () => {
   setBootstrap({});
   document.getElementById('app')?.setAttribute('data-bootstrap', '{');
-  await getJson(`${EXTENSION_BASE}/chart/capabilities`);
+  const { client } = await loadClient();
+  await client.getJson('/chart/capabilities');
   expect(fetchMock).toHaveBeenLastCalledWith(
-    `${EXTENSION_BASE}/chart/capabilities`,
+    '/extensions/michael-s-molina/sqllab-gsheets/chart/capabilities',
     { method: 'GET' },
   );
 });
