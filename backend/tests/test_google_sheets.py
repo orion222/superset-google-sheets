@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import ANY
 
 import pytest
+from google.auth.exceptions import RefreshError
 
 from michael_s_molina.sqllab_gsheets.cells import CellValue
 from michael_s_molina.sqllab_gsheets.errors import ExportRejected
@@ -27,7 +28,7 @@ def test_creates_in_shared_drive_writes_formats_then_shares_last(app, google):
             "appProperties": {"superset_export_id": ANY},
         },
         supportsAllDrives=True,
-        fields="id",
+        fields="id,owners(emailAddress)",
     )
     assert [c[0] for c in google.call_order] == [
         "files.create",
@@ -190,3 +191,111 @@ def test_cell_limit_counts_header_rows_across_tabs():
 
 def test_cell_limit_ignores_empty_tabs():
     check_cell_limit([Tab("a", [], [])])
+
+
+USER_INFO = {
+    "type": "authorized_user",
+    "client_id": "c",
+    "client_secret": "s",
+    "refresh_token": "r",
+}
+
+
+def test_service_account_uses_drive_and_sheets_scopes(app, google):
+    create_spreadsheet("t", [Tab("a", [["h"]], [])], "u@x.com")
+    google.service_account_factory.assert_called_once_with(
+        {"type": "service_account"},
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    )
+    google.user_factory.assert_not_called()
+
+
+def test_authorized_user_uses_drive_file_scope_only(app, google):
+    app.config["GSHEETS_CREDENTIALS"] = USER_INFO
+    create_spreadsheet("t", [Tab("a", [["h"]], [])], "u@x.com")
+    google.user_factory.assert_called_once_with(
+        USER_INFO, scopes=["https://www.googleapis.com/auth/drive.file"]
+    )
+    google.service_account_factory.assert_not_called()
+
+
+def test_bad_user_credentials_fail_before_any_drive_call(app, google):
+    app.config["GSHEETS_CREDENTIALS"] = {"type": "authorized_user", "client_id": "c"}
+    google.user_factory.side_effect = ValueError("missing refresh_token")
+    with pytest.raises(GoogleExportError):
+        create_spreadsheet("t", [Tab("a", [["h"]], [])], "u@x.com")
+    assert google.call_order == []
+
+
+def test_owner_export_skips_share_case_insensitively(app, google):
+    app.config["GSHEETS_CREDENTIALS"] = USER_INFO
+    google.create_owners = ["owner@gmail.com"]
+    url = create_spreadsheet("t", [Tab("a", [["h"]], [])], "Owner@Gmail.com")
+    google.drive.about().get.assert_not_called()
+    google.drive.permissions().create.assert_not_called()
+    assert url == "https://docs.google.com/spreadsheets/d/file-1/edit"
+
+
+def test_teammate_export_is_shared_under_personal_account(app, google):
+    app.config["GSHEETS_CREDENTIALS"] = USER_INFO
+    google.create_owners = ["owner@gmail.com"]
+    create_spreadsheet("t", [Tab("a", [["h"]], [])], "mate@x.com")
+    assert [c[0] for c in google.call_order] == [
+        "files.create",
+        "batchUpdate",
+        "values.batchUpdate",
+        "batchUpdate",
+        "permissions.create",
+    ]
+
+
+def test_missing_owner_email_shares_as_normal(app, google):
+    app.config["GSHEETS_CREDENTIALS"] = USER_INFO
+    google.create_owners = []
+    create_spreadsheet("t", [Tab("a", [["h"]], [])], "owner@gmail.com")
+    google.drive.permissions().create.assert_called_once()
+
+
+def test_service_account_never_calls_about(app, google):
+    create_spreadsheet("t", [Tab("a", [["h"]], [])], "owner@gmail.com")
+    google.drive.about().get.assert_not_called()
+    google.drive.permissions().create.assert_called_once()
+
+
+def test_owner_metadata_missing_shares_as_normal(app, google):
+    app.config["GSHEETS_CREDENTIALS"] = USER_INFO
+    create_spreadsheet("t", [Tab("a", [["h"]], [])], "owner@gmail.com")
+    google.drive.about().get.assert_not_called()
+    google.drive.permissions().create.assert_called_once()
+
+
+def test_refresh_error_logs_personal_setup_hint_once(app, google, caplog):
+    app.config["GSHEETS_CREDENTIALS"] = USER_INFO
+    google.drive.files().create.side_effect = RefreshError("invalid_grant")
+    with pytest.raises(GoogleExportError):
+        create_spreadsheet("t", [Tab("a", [["h"]], [])], "owner@gmail.com")
+    assert "gsheets-personal-setup" in caplog.text
+    assert len(
+        [
+            record
+            for record in caplog.records
+            if record.name == "michael_s_molina.sqllab_gsheets.google_sheets"
+        ]
+    ) == 1
+
+
+def test_service_account_refresh_error_has_no_personal_setup_hint(app, google, caplog):
+    google.drive.files().create.side_effect = RefreshError("invalid_grant")
+    with pytest.raises(GoogleExportError):
+        create_spreadsheet("t", [Tab("a", [["h"]], [])], "owner@gmail.com")
+    assert "gsheets-personal-setup" not in caplog.text
+    assert len(
+        [
+            record
+            for record in caplog.records
+            if record.name == "michael_s_molina.sqllab_gsheets.google_sheets"
+        ]
+    ) == 1

@@ -23,8 +23,8 @@ _decorators.api = _passthrough_api
 def app():
     flask_app = Flask(__name__)
     flask_app.config.update(
-        GSHEETS_SERVICE_ACCOUNT={"type": "service_account"},
-        GSHEETS_SHARED_DRIVE_FOLDER_ID="folder-1",
+        GSHEETS_CREDENTIALS={"type": "service_account"},
+        GSHEETS_FOLDER_ID="folder-1",
     )
     with flask_app.app_context():
         yield flask_app
@@ -38,6 +38,9 @@ class FakeGoogle:
         self.sheets = MagicMock(name="sheets")
         self.call_order: list[tuple[str]] = []
         self.sleep_calls: list[float] = []
+        self.service_account_factory: MagicMock
+        self.user_factory: MagicMock
+        self.create_owners: list[str] | None = None
         self._failures: dict[str, tuple[int, int]] = {}
         self._wire()
 
@@ -60,7 +63,21 @@ class FakeGoogle:
 
     def _wire(self) -> None:
         files = self.drive.files()
-        files.create.side_effect = lambda **_: self._request("files.create", {"id": "file-1"})
+        files.create.side_effect = lambda **_: self._request(
+            "files.create",
+            lambda: {
+                "id": "file-1",
+                **(
+                    {
+                        "owners": [
+                            {"emailAddress": email} for email in self.create_owners
+                        ]
+                    }
+                    if self.create_owners is not None
+                    else {}
+                ),
+            },
+        )
         files.update.side_effect = lambda **_: self._request("files.update", {})
         self.drive.permissions().create.side_effect = lambda **_: self._request(
             "permissions.create", {}
@@ -96,7 +113,14 @@ def google():
             f"{module}.build",
             side_effect=lambda name, *_, **__: fake.drive if name == "drive" else fake.sheets,
         ),
-        patch(f"{module}.service_account.Credentials.from_service_account_info"),
+        patch(
+            f"{module}.auth.service_account.Credentials.from_service_account_info"
+        ) as service_account_factory,
+        patch(
+            f"{module}.auth.user_credentials.Credentials.from_authorized_user_info"
+        ) as user_factory,
         patch(f"{module}.time.sleep", side_effect=fake.sleep_calls.append),
     ):
+        fake.service_account_factory = service_account_factory
+        fake.user_factory = user_factory
         yield fake

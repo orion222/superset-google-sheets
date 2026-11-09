@@ -10,8 +10,12 @@ dependencies = [
     "pandas>=1.0.0",
 ]
 
+[project.scripts]
+gsheets-personal-setup = "michael_s_molina.sqllab_gsheets.personal_setup:main"
+
 [project.optional-dependencies]
 test = ["pytest>=8", "flask>=2.3", "mypy>=1.10", "pandas-stubs"]
+setup = ["google-auth-oauthlib>=1.0"]
 
 [tool.apache_superset_extensions.build]
 include = [

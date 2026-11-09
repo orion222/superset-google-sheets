@@ -1,10 +1,10 @@
 import pytest
 
 from michael_s_molina.sqllab_gsheets.config import (
+    credentials_info,
+    folder_id,
     export_timeout_seconds,
     GoogleSheetsConfigError,
-    service_account_info,
-    shared_drive_folder_id,
     sql_lab_max_rows,
     sync_max_rows,
 )
@@ -23,8 +23,8 @@ def test_overrides(app):
 @pytest.mark.parametrize(
     "key, fn",
     [
-        ("GSHEETS_SHARED_DRIVE_FOLDER_ID", shared_drive_folder_id),
-        ("GSHEETS_SERVICE_ACCOUNT", service_account_info),
+        ("GSHEETS_FOLDER_ID", folder_id),
+        ("GSHEETS_CREDENTIALS", credentials_info),
     ],
 )
 def test_missing_required_key_raises(app, key, fn):
@@ -36,8 +36,8 @@ def test_missing_required_key_raises(app, key, fn):
 @pytest.mark.parametrize(
     "key, fn",
     [
-        ("GSHEETS_SHARED_DRIVE_FOLDER_ID", shared_drive_folder_id),
-        ("GSHEETS_SERVICE_ACCOUNT", service_account_info),
+        ("GSHEETS_FOLDER_ID", folder_id),
+        ("GSHEETS_CREDENTIALS", credentials_info),
     ],
 )
 def test_empty_required_key_raises(app, key, fn):
@@ -47,8 +47,47 @@ def test_empty_required_key_raises(app, key, fn):
 
 
 def test_required_values_returned(app):
-    assert shared_drive_folder_id() == "folder-1"
-    assert service_account_info() == {"type": "service_account"}
+    assert folder_id() == "folder-1"
+    assert credentials_info() == {"type": "service_account"}
+
+
+@pytest.mark.parametrize(
+    "old, new, fn",
+    [
+        ("GSHEETS_SERVICE_ACCOUNT", "GSHEETS_CREDENTIALS", credentials_info),
+        ("GSHEETS_SHARED_DRIVE_FOLDER_ID", "GSHEETS_FOLDER_ID", folder_id),
+    ],
+)
+def test_old_key_without_new_names_the_rename(app, old, new, fn):
+    app.config[old] = app.config.pop(new)
+    with pytest.raises(GoogleSheetsConfigError, match=f"{old} was renamed to {new}"):
+        fn()
+
+
+def test_new_key_wins_when_old_key_also_set(app):
+    app.config.update(GSHEETS_SERVICE_ACCOUNT={"type": "x"}, GSHEETS_SHARED_DRIVE_FOLDER_ID="old")
+    assert credentials_info() == {"type": "service_account"}
+    assert folder_id() == "folder-1"
+
+
+def test_authorized_user_type_accepted(app):
+    app.config["GSHEETS_CREDENTIALS"] = {"type": "authorized_user", "refresh_token": "r"}
+    assert credentials_info()["type"] == "authorized_user"
+
+
+@pytest.mark.parametrize(
+    "info", [{"client_id": "c"}, {"type": "external_account"}, {"type": None}]
+)
+def test_unknown_or_missing_type_lists_accepted_values(app, info):
+    app.config["GSHEETS_CREDENTIALS"] = info
+    with pytest.raises(GoogleSheetsConfigError, match="service_account.*authorized_user"):
+        credentials_info()
+
+
+def test_json_string_credentials_rejected(app):
+    app.config["GSHEETS_CREDENTIALS"] = '{"type": "service_account"}'
+    with pytest.raises(GoogleSheetsConfigError, match="dict"):
+        credentials_info()
 
 
 @pytest.mark.parametrize(

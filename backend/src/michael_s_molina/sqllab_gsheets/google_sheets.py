@@ -1,4 +1,4 @@
-"""Creates and populates spreadsheets in the shared Drive; the only module that talks to Google."""
+"""Creates and populates spreadsheets in Google Drive; the only module that talks to Google."""
 
 from __future__ import annotations
 
@@ -9,23 +9,19 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
-from google.auth.exceptions import TransportError
-from google.oauth2 import service_account
+from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from httplib2 import HttpLib2Error
 
+from . import auth
 from .cells import CellValue
-from .config import service_account_info, shared_drive_folder_id
+from .config import credentials_info, folder_id
 from .errors import ExportRejected
 from .google_http import GoogleHttp
 
 logger = logging.getLogger(__name__)
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
 MAX_WRITE_BYTES = 2_000_000
 MAX_ATTEMPTS = 5
 RETRYABLE_STATUSES = {429, 500, 503}
@@ -43,6 +39,12 @@ class Tab:
     name: str
     rows: list[list[CellValue]]
     temporal_columns: list[int]
+
+
+@dataclass(frozen=True)
+class CreatedFile:
+    file_id: str
+    owner_emails: tuple[str, ...]
 
 
 class GoogleExportError(Exception):
@@ -81,6 +83,15 @@ def _execute(request: Any, *, retry_safe: bool = False) -> Any:
                 raise
             time.sleep(2**attempt)
     raise AssertionError("unreachable")
+
+
+def _file_metadata(info: dict[str, Any]) -> CreatedFile:
+    owners = tuple(
+        owner["emailAddress"]
+        for owner in info.get("owners", [])
+        if owner.get("emailAddress")
+    )
+    return CreatedFile(file_id=info["id"], owner_emails=owners)
 
 
 def _find_created_file(drive: Any, parent: str, export_id: str) -> str | None:
@@ -124,22 +135,24 @@ def _find_created_file(drive: Any, parent: str, export_id: str) -> str | None:
             return next(iter(matches), None)
 
 
-def _create_file(drive: Any, title: str, parent: str) -> str:
+def _create_file(drive: Any, title: str, parent: str) -> CreatedFile:
     """Create once and recover a lost response by its private export marker."""
     export_id = uuid4().hex
     try:
-        return _execute(
-            drive.files().create(
-                body={
-                    "name": title,
-                    "mimeType": SPREADSHEET_MIME_TYPE,
-                    "parents": [parent],
-                    "appProperties": {EXPORT_ID_PROPERTY: export_id},
-                },
-                supportsAllDrives=True,
-                fields="id",
+        return _file_metadata(
+            _execute(
+                drive.files().create(
+                    body={
+                        "name": title,
+                        "mimeType": SPREADSHEET_MIME_TYPE,
+                        "parents": [parent],
+                        "appProperties": {EXPORT_ID_PROPERTY: export_id},
+                    },
+                    supportsAllDrives=True,
+                    fields="id,owners(emailAddress)",
+                )
             )
-        )["id"]
+        )
     except (HttpError, OSError, HttpLib2Error, TransportError) as ex:
         if (
             isinstance(ex, HttpError)
@@ -156,7 +169,7 @@ def _create_file(drive: Any, title: str, parent: str) -> str:
         except Exception:
             logger.exception("Couldn't look up spreadsheet for export %s", export_id)
         if recovered_id is not None:
-            return recovered_id
+            return CreatedFile(file_id=recovered_id, owner_emails=())
         # Search visibility is not proof that creation failed; never create again.
         logger.error("Spreadsheet creation unresolved; export marker %s", export_id)
         raise
@@ -259,15 +272,16 @@ def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
     file_id: str | None = None
     drive: Any = None
     http: GoogleHttp | None = None
+    info: dict[str, Any] | None = None
     try:
-        credentials = service_account.Credentials.from_service_account_info(
-            service_account_info(), scopes=SCOPES
-        )
+        info = credentials_info()
+        credentials = auth.credentials(info)
         http = GoogleHttp(credentials)
         drive = build("drive", "v3", http=http, cache_discovery=False)
         sheets = build("sheets", "v4", http=http, cache_discovery=False)
 
-        file_id = _create_file(drive, title, shared_drive_folder_id())
+        created_file = _create_file(drive, title, folder_id())
+        file_id = created_file.file_id
 
         structure = [
             {
@@ -309,14 +323,23 @@ def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
             retry_safe=True,
         )
 
-        _execute(
-            drive.permissions().create(
-                fileId=file_id,
-                body={"type": "user", "role": "writer", "emailAddress": share_with},
-                supportsAllDrives=True,
-                sendNotificationEmail=True,
+        if not any(
+            owner.casefold() == share_with.casefold()
+            for owner in created_file.owner_emails
+        ):
+            _execute(
+                drive.permissions().create(
+                    fileId=file_id,
+                    body={"type": "user", "role": "writer", "emailAddress": share_with},
+                    supportsAllDrives=True,
+                    sendNotificationEmail=True,
+                )
             )
-        )
+    except RefreshError as ex:
+        logger.exception("Google Sheets export failed%s", auth.failure_hint(ex, info))
+        if file_id is not None:
+            _trash(drive, file_id)
+        raise GoogleExportError() from ex
     except Exception as ex:
         logger.exception("Google Sheets export failed")
         if file_id is not None:
