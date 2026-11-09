@@ -52,21 +52,20 @@ def _run(payload: dict[str, Any]) -> list[Any]:
         raise ExportRejected(500, GENERIC_FAILURE) from ex
 
 
-def _validate(payload: Any, chart_name: Any, chart_id: Any) -> None:
+def _chart_id(value: Any) -> int | None:
+    # Chart IDs only label tabs, so unusable values have no identity.
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _validate(payload: Any, chart_name: Any) -> None:
     form_data = payload.get("form_data") if isinstance(payload, dict) else None
     valid = (
         isinstance(payload, dict)
         and bool(payload)
         and (form_data is None or isinstance(form_data, dict))
         and (chart_name is None or isinstance(chart_name, str))
-        and (
-            chart_id is None
-            or (
-                isinstance(chart_id, int)
-                and not isinstance(chart_id, bool)
-                and chart_id > 0
-            )
-        )
     )
     if not valid:
         raise ExportRejected(400, INVALID_REQUEST)
@@ -97,7 +96,7 @@ def export_chart(
 ) -> str:
     if not email or not can_export_data():
         raise ExportRejected(403, "You don't have permission to export to Google Sheets.")
-    _validate(payload, chart_name, chart_id)
+    _validate(payload, chart_name)
 
     results = _run(payload)
 
@@ -114,7 +113,7 @@ def export_chart(
     title = f"{name} · {now.strftime('%Y-%m-%d %H:%M')} UTC"
 
     try:
-        tabs = _tabs(payload, name, results, chart_id)
+        tabs = _tabs(payload, name, results, _chart_id(chart_id))
     except Exception as ex:
         logger.exception("Couldn't build Google Sheets tabs for the chart")
         raise ExportRejected(500, GENERIC_FAILURE) from ex

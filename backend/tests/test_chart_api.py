@@ -74,12 +74,12 @@ def test_chart_id_falls_back_to_form_data(app, m):
     assert [t.name for t in m.create_spreadsheet.call_args.args[1]] == ["7 - Sales"]
 
 
-@pytest.mark.parametrize("chart_id", ["59", True, -1, 0.5])
-def test_invalid_chart_id_is_400(app, m, chart_id):
-    with pytest.raises(ExportRejected) as e:
-        export_chart(PAYLOAD, "Sales", "u@x.com", NOW, chart_id=chart_id)
-    assert (e.value.status, e.value.message) == (400, "Invalid export request.")
-    m.run_query_context.assert_not_called()
+@pytest.mark.parametrize("chart_id", ["59", True, -1, 0, 0.5])
+def test_invalid_chart_id_is_ignored(app, m, chart_id):
+    export_chart(
+        {"form_data": {"slice_id": 0}}, "Sales", "u@x.com", NOW, chart_id=chart_id
+    )
+    assert [t.name for t in m.create_spreadsheet.call_args.args[1]] == ["Sales"]
 
 
 def test_missing_and_null_slice_id_have_no_id_prefix(app, m):
