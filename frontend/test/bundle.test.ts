@@ -22,7 +22,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 
 interface ScriptElement {
@@ -69,18 +69,7 @@ beforeAll(() => {
 }, 60000);
 
 afterAll(() => {
-  if (outputDirectory) {
-    const resolvedOutputDirectory = resolve(outputDirectory);
-    if (
-      dirname(resolvedOutputDirectory) !== resolve(tmpdir()) ||
-      !basename(resolvedOutputDirectory).startsWith(temporaryDirectoryPrefix)
-    ) {
-      throw new Error(
-        'Refusing to remove a directory outside the temporary build location',
-      );
-    }
-    rmSync(resolvedOutputDirectory, { recursive: true, force: true });
-  }
+  rmSync(outputDirectory, { recursive: true, force: true });
 });
 
 test.each([
