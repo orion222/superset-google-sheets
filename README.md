@@ -114,12 +114,15 @@ Exports are owned by one personal Google account. No Shared Drive is needed.
    - Set the publishing status to **In production**. Under **Testing**, refresh tokens expire after 7 days.
    - An unverified app in production with only `drive.file` needs no verification. Consent may show an "unverified app" screen once, which the owner clicks through.
 3. Create an OAuth client of type **Desktop app** and download its JSON.
-4. Install the setup dependencies and run the script from the repository root. It opens a browser for consent, creates the export folder, and prints the config:
+4. Install the setup dependencies and run the setup command. It opens a browser for consent, creates the export folder, and prints the config:
 
    ```bash
    pip install -e "backend[setup]"
-   python scripts/gsheets_personal_setup.py path/to/client_secret.json
+   gsheets-personal-setup path/to/client_secret.json
    ```
+
+   From a repository checkout, run:
+   `python scripts/gsheets_personal_setup.py path/to/client_secret.json`.
 
    Use `--folder-name NAME` to name the folder. The default is `Superset exports`.
 
