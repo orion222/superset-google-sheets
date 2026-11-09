@@ -242,7 +242,7 @@ def retry_google(app: Flask, monkeypatch: pytest.MonkeyPatch) -> _RetryGoogle:
     google = _RetryGoogle()
     monkeypatch.setattr(writer, "build", google.build)
     monkeypatch.setattr(
-        writer.service_account.Credentials,
+        writer.auth.service_account.Credentials,
         "from_service_account_info",
         MagicMock(return_value=object()),
     )

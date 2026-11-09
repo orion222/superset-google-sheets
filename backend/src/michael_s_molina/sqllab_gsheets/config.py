@@ -5,18 +5,24 @@ from typing import Any
 
 from flask import current_app
 
+from .auth import CREDENTIAL_FACTORIES
+
 DEFAULT_SYNC_MAX_ROWS = 100_000
 DEFAULT_EXPORT_TIMEOUT_SECONDS = 900
-CREDENTIAL_TYPES = ("service_account", "authorized_user")
+_RENAMED = {
+    "GSHEETS_CREDENTIALS": "GSHEETS_SERVICE_ACCOUNT",
+    "GSHEETS_FOLDER_ID": "GSHEETS_SHARED_DRIVE_FOLDER_ID",
+}
 
 
 class GoogleSheetsConfigError(Exception):
     """Raised when a GSHEETS_* Superset config key is missing, empty, or invalid."""
 
 
-def _required(key: str, renamed_from: str | None = None) -> Any:
+def _required(key: str) -> Any:
     value = current_app.config.get(key)
     if not value:
+        renamed_from = _RENAMED.get(key)
         if renamed_from and current_app.config.get(renamed_from):
             raise GoogleSheetsConfigError(f"{renamed_from} was renamed to {key}")
         raise GoogleSheetsConfigError(f"{key} config is not set")
@@ -24,18 +30,25 @@ def _required(key: str, renamed_from: str | None = None) -> Any:
 
 
 def credentials_info() -> dict[str, Any]:
-    info = _required("GSHEETS_CREDENTIALS", renamed_from="GSHEETS_SERVICE_ACCOUNT")
+    info = _required("GSHEETS_CREDENTIALS")
     if not isinstance(info, dict):
-        raise GoogleSheetsConfigError("GSHEETS_CREDENTIALS must be a dict, not a JSON string")
-    if info.get("type") not in CREDENTIAL_TYPES:
         raise GoogleSheetsConfigError(
-            f"GSHEETS_CREDENTIALS type must be one of: {', '.join(CREDENTIAL_TYPES)}"
+            "GSHEETS_CREDENTIALS must be a dict, not a JSON string"
+        )
+    credential_type = info.get("type")
+    if (
+        not isinstance(credential_type, str)
+        or credential_type not in CREDENTIAL_FACTORIES
+    ):
+        raise GoogleSheetsConfigError(
+            "GSHEETS_CREDENTIALS type must be one of: "
+            f"{', '.join(CREDENTIAL_FACTORIES)}"
         )
     return info
 
 
 def folder_id() -> str:
-    return _required("GSHEETS_FOLDER_ID", renamed_from="GSHEETS_SHARED_DRIVE_FOLDER_ID")
+    return _required("GSHEETS_FOLDER_ID")
 
 
 def sync_max_rows() -> int:

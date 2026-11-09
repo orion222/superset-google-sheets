@@ -38,9 +38,9 @@ class FakeGoogle:
         self.sheets = MagicMock(name="sheets")
         self.call_order: list[tuple[str]] = []
         self.sleep_calls: list[float] = []
-        self.service_account_factory = MagicMock(name="service_account_factory")
-        self.user_factory = MagicMock(name="user_factory")
-        self.about_reply: dict[str, Any] = {"user": {"emailAddress": "owner@gmail.com"}}
+        self.service_account_factory: MagicMock
+        self.user_factory: MagicMock
+        self.create_owners: list[str] | None = None
         self._failures: dict[str, tuple[int, int]] = {}
         self._wire()
 
@@ -63,13 +63,24 @@ class FakeGoogle:
 
     def _wire(self) -> None:
         files = self.drive.files()
-        files.create.side_effect = lambda **_: self._request("files.create", {"id": "file-1"})
+        files.create.side_effect = lambda **_: self._request(
+            "files.create",
+            lambda: {
+                "id": "file-1",
+                **(
+                    {
+                        "owners": [
+                            {"emailAddress": email} for email in self.create_owners
+                        ]
+                    }
+                    if self.create_owners is not None
+                    else {}
+                ),
+            },
+        )
         files.update.side_effect = lambda **_: self._request("files.update", {})
         self.drive.permissions().create.side_effect = lambda **_: self._request(
             "permissions.create", {}
-        )
-        self.drive.about().get.side_effect = lambda **_: self._request(
-            "about.get", lambda: self.about_reply
         )
         spreadsheets = self.sheets.spreadsheets()
         spreadsheets.batchUpdate.side_effect = lambda spreadsheetId, body: self._request(
@@ -103,10 +114,10 @@ def google():
             side_effect=lambda name, *_, **__: fake.drive if name == "drive" else fake.sheets,
         ),
         patch(
-            f"{module}.service_account.Credentials.from_service_account_info"
+            f"{module}.auth.service_account.Credentials.from_service_account_info"
         ) as service_account_factory,
         patch(
-            f"{module}.user_credentials.Credentials.from_authorized_user_info"
+            f"{module}.auth.user_credentials.Credentials.from_authorized_user_info"
         ) as user_factory,
         patch(f"{module}.time.sleep", side_effect=fake.sleep_calls.append),
     ):
