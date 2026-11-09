@@ -177,7 +177,11 @@ class _RetryGoogle:
         """Distinguish structural mutations from repeatable formatting updates."""
         requests = kwargs["body"]["requests"]
         structural = any(
-            "addSheet" in request or "deleteSheet" in request for request in requests
+            any(
+                key in request
+                for key in ("addSheet", "deleteSheet", "updateSheetProperties")
+            )
+            for request in requests
         )
 
         def effect() -> dict[str, Any]:
@@ -202,6 +206,18 @@ class _RetryGoogle:
                             }
                         }
                     )
+                elif "updateSheetProperties" in request:
+                    properties = request["updateSheetProperties"]["properties"]
+                    sheet_id = properties["sheetId"]
+                    if sheet_id not in grid.values():
+                        raise _http_error(400)
+                    grid = {
+                        name: value for name, value in grid.items() if value != sheet_id
+                    }
+                    if properties["title"] in grid:
+                        raise _http_error(400)
+                    grid[properties["title"]] = sheet_id
+                    replies.append({})
                 elif "deleteSheet" in request:
                     sheet_id = request["deleteSheet"]["sheetId"]
                     if sheet_id not in grid.values():

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import ANY
 
 import pytest
+from flask import Flask
 
 from michael_s_molina.sqllab_gsheets.cells import CellValue
 from michael_s_molina.sqllab_gsheets.errors import ExportRejected
@@ -45,19 +47,129 @@ def test_creates_in_shared_drive_writes_formats_then_shares_last(app, google):
     assert url == "https://docs.google.com/spreadsheets/d/file-1/edit"
 
 
-def test_first_batch_adds_frozen_tabs_then_deletes_default_sheet(app, google):
+def test_first_batch_reuses_the_default_grid_then_adds_frozen_tabs(app, google):
     create_spreadsheet("t", [Tab("a", [["h"]], []), Tab("b", [["h"]], [])], "u@x.com")
     requests = (
         google.sheets.spreadsheets()
         .batchUpdate.call_args_list[0]
         .kwargs["body"]["requests"]
     )
-    assert requests[0]["addSheet"]["properties"] == {
+    assert requests[0]["updateSheetProperties"]["properties"] == {
+        "sheetId": 0,
         "title": "a",
-        "gridProperties": {"frozenRowCount": 1},
+        "gridProperties": {"frozenRowCount": 0, "rowCount": 1, "columnCount": 1},
     }
     assert requests[1]["addSheet"]["properties"]["title"] == "b"
-    assert requests[2] == {"deleteSheet": {"sheetId": 0}}
+    assert len(requests) == 2
+
+
+def test_tab_grids_match_the_data_cell_budget(app, google):
+    create_spreadsheet("t", [Tab("wide", [["a", "b"], [1, 2], [3, 4]], [])], "u@x.com")
+    requests = (
+        google.sheets.spreadsheets()
+        .batchUpdate.call_args_list[0]
+        .kwargs["body"]["requests"]
+    )
+    assert requests[0]["updateSheetProperties"]["properties"]["gridProperties"] == {
+        "frozenRowCount": 1,
+        "rowCount": 3,
+        "columnCount": 2,
+    }
+
+
+@pytest.mark.parametrize("after_data_tab", [False, True])
+def test_header_only_temporal_tabs_keep_format_ranges_within_grid(
+    app: Flask, google: Any, after_data_tab: bool
+) -> None:
+    """A query with no records must never format a row outside its allocated grid."""
+    tabs = [Tab("No rows", [["timestamp"]], [0])]
+    if after_data_tab:
+        tabs.insert(0, Tab("Data", [["value"], [123]], []))
+    create_spreadsheet("t", tabs, "u@x.com")
+
+    calls = google.sheets.spreadsheets().batchUpdate.call_args_list
+    grids: dict[int, dict[str, int]] = {}
+    for request in calls[0].kwargs["body"]["requests"]:
+        if "updateSheetProperties" in request:
+            properties = request["updateSheetProperties"]["properties"]
+            sheet_id = properties["sheetId"]
+        else:
+            properties = request["addSheet"]["properties"]
+            sheet_id = 100 + len(grids) - 1
+        grids[sheet_id] = properties["gridProperties"]
+
+    format_requests = calls[1].kwargs["body"]["requests"]
+    bold_headers = [
+        request["repeatCell"]["range"]["sheetId"]
+        for request in format_requests
+        if request["repeatCell"]["cell"].get("userEnteredFormat")
+        == {"textFormat": {"bold": True}}
+    ]
+    assert set(bold_headers) == set(grids)
+    for request in format_requests:
+        area = request["repeatCell"]["range"]
+        grid = grids[area["sheetId"]]
+        assert area.get("startRowIndex", 0) < grid["rowCount"]
+        assert area.get("startColumnIndex", 0) < grid["columnCount"]
+
+
+@pytest.mark.parametrize("phase", ["create", "structure", "values", "format", "share"])
+def test_cancel_during_google_write_trashes_the_partial_file(app, google, phase):
+    """A cancellation noticed after any phase prevents a successful return."""
+    operations = {
+        "create": ["files.create"],
+        "structure": ["files.create", "batchUpdate"],
+        "values": ["files.create", "batchUpdate", "values.batchUpdate"],
+        "format": ["files.create", "batchUpdate", "values.batchUpdate", "batchUpdate"],
+        "share": [
+            "files.create",
+            "batchUpdate",
+            "values.batchUpdate",
+            "batchUpdate",
+            "permissions.create",
+        ],
+    }
+
+    def checkpoint():
+        if [c[0] for c in google.call_order] == operations[phase]:
+            raise RuntimeError("cancel requested")
+
+    with pytest.raises(GoogleExportError):
+        create_spreadsheet(
+            "t", [Tab("a", [["h"], [1]], [])], "u@x.com", checkpoint=checkpoint
+        )
+    google.drive.files().update.assert_called_once_with(
+        fileId="file-1", body={"trashed": True}, supportsAllDrives=True
+    )
+    if phase != "share":
+        google.drive.permissions().create.assert_not_called()
+
+
+def test_cancel_before_creation_does_not_create_a_file(app, google):
+    def checkpoint():
+        raise RuntimeError("cancel requested")
+
+    with pytest.raises(GoogleExportError):
+        create_spreadsheet(
+            "t", [Tab("a", [["h"]], [])], "u@x.com", checkpoint=checkpoint
+        )
+    google.drive.files().create.assert_not_called()
+
+
+def test_base_exception_during_write_cleans_up_and_propagates(app, google):
+    class AbortSignal(BaseException):
+        """A non-Exception signal must not become a successful task."""
+
+    def checkpoint():
+        if any(c[0] == "values.batchUpdate" for c in google.call_order):
+            raise AbortSignal()
+
+    with pytest.raises(AbortSignal):
+        create_spreadsheet(
+            "t", [Tab("a", [["h"]], [])], "u@x.com", checkpoint=checkpoint
+        )
+    google.drive.files().update.assert_called_once()
+    google.drive.permissions().create.assert_not_called()
 
 
 def test_headers_are_bolded_using_returned_sheet_ids(app, google):
@@ -68,7 +180,7 @@ def test_headers_are_bolded_using_returned_sheet_ids(app, google):
         .kwargs["body"]["requests"]
     )
     bold = [r["repeatCell"] for r in requests if "textFormat" in str(r)]
-    assert [r["range"]["sheetId"] for r in bold] == [100, 101]
+    assert [r["range"]["sheetId"] for r in bold] == [0, 100]
     assert bold[0]["range"]["startRowIndex"] == 0
     assert bold[0]["range"]["endRowIndex"] == 1
     assert bold[0]["cell"]["userEnteredFormat"] == {"textFormat": {"bold": True}}
