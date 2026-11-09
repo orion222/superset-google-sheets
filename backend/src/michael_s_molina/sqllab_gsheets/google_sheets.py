@@ -17,7 +17,7 @@ from httplib2 import HttpLib2Error
 
 from .cells import CellValue
 from .config import service_account_info, shared_drive_folder_id
-from .errors import ExportRejected
+from .errors import ExportRejected, GENERIC_FAILURE
 from .google_http import GoogleHttp
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ class Tab:
 
 class GoogleExportError(Exception):
     def __init__(self) -> None:
-        super().__init__("Couldn't create the Google Sheet. Try again later.")
+        super().__init__(GENERIC_FAILURE)
 
 
 def tab_label(chart_id: int | None, chart_name: str, index: int) -> str:
