@@ -9,11 +9,9 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
-from google.auth.exceptions import TransportError
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from httplib2 import HttpLib2Error
 
 from .cells import CellValue
 from .config import service_account_info, shared_drive_folder_id
@@ -71,16 +69,14 @@ def check_cell_limit(tabs: list[Tab]) -> None:
 
 def _execute(request: Any, *, retry_safe: bool = False) -> Any:
     """Retry only operations whose repeated application has the same outcome."""
-    attempts = MAX_ATTEMPTS if retry_safe else 1
-    for attempt in range(attempts):
-        try:
-            return request.execute()
-        except HttpError as ex:
-            retryable = getattr(ex.resp, "status", None) in RETRYABLE_STATUSES
-            if not retryable or attempt == attempts - 1:
-                raise
-            time.sleep(2**attempt)
-    raise AssertionError("unreachable")
+    return request.execute(num_retries=MAX_ATTEMPTS - 1 if retry_safe else 0)
+
+
+def _is_ambiguous(error: Exception) -> bool:
+    if isinstance(error, HttpError):
+        status = getattr(error.resp, "status", None)
+        return status is None or status >= 500 or status in {408, 429}
+    return isinstance(error, OSError)
 
 
 def _find_created_file(drive: Any, parent: str, export_id: str) -> str | None:
@@ -140,13 +136,10 @@ def _create_file(drive: Any, title: str, parent: str) -> str:
                 fields="id",
             )
         )["id"]
-    except (HttpError, OSError, HttpLib2Error, TransportError) as ex:
-        if (
-            isinstance(ex, HttpError)
-            and ex.resp.status < 500
-            and ex.resp.status not in {408, 429}
-        ):
+    except (HttpError, OSError) as ex:
+        if not _is_ambiguous(ex):
             raise
+        time.sleep(0.5)
         logger.warning(
             "Reconciling uncertain spreadsheet creation for export %s", export_id
         )

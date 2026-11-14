@@ -21,7 +21,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from google.auth.credentials import Credentials
-from google.auth.exceptions import TransportError
 from google.auth.transport.requests import AuthorizedSession
 from httplib2 import Response
 from requests.adapters import HTTPAdapter
@@ -29,7 +28,7 @@ from requests.exceptions import RequestException
 
 
 class GoogleHttp:
-    """Provide googleapiclient's HTTP contract while leaving retries to the writer."""
+    """Provide googleapiclient's HTTP contract without implicit retries."""
 
     def __init__(self, credentials: Credentials, timeout: float = 60.0) -> None:
         self.timeout = timeout
@@ -56,7 +55,7 @@ class GoogleHttp:
             )
             content = response.content
         except RequestException as ex:
-            raise TransportError("Google API transport failed") from ex
+            raise ConnectionError("Google API transport failed") from ex
         metadata = dict(response.headers)
         metadata["status"] = str(response.status_code)
         metadata["reason"] = response.reason
