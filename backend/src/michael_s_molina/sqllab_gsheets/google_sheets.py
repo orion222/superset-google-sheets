@@ -163,40 +163,42 @@ def _size(rows: list[list[CellValue]]) -> int:
     return len(json.dumps(rows))
 
 
-def _pieces(tabs: list[Tab]) -> list[tuple[dict[str, Any], int]]:
-    """Value ranges paired with their JSON size; oversize tabs are cut into row slices."""
-    pieces: list[tuple[dict[str, Any], int]] = []
-    for tab in tabs:
-        if not tab.rows:
-            continue
-        start = 0
-        chunk: list[list[CellValue]] = []
-        chunk_size = 0
-        for row_number, row in enumerate(tab.rows):
-            row_size = _size([row])
-            if chunk and chunk_size + row_size > MAX_WRITE_BYTES:
-                pieces.append((_range(tab.name, start, chunk), chunk_size))
-                start, chunk, chunk_size = row_number, [], 0
-            chunk.append(row)
-            chunk_size += row_size
-        pieces.append((_range(tab.name, start, chunk), chunk_size))
-    return pieces
-
-
-def _range(name: str, start_row: int, rows: list[list[CellValue]]) -> dict[str, Any]:
-    return {"range": f"{_a1_prefix(name)}!A{start_row + 1}", "values": rows}
-
-
 def _value_batches(tabs: list[Tab]) -> list[list[dict[str, Any]]]:
     batches: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_size = 0
-    for piece, size in _pieces(tabs):
-        if current and current_size + size > MAX_WRITE_BYTES:
+    range_name = ""
+    range_start = 0
+    range_rows: list[list[CellValue]] = []
+    range_size = 0
+
+    def append_range() -> None:
+        nonlocal current, current_size, range_rows, range_size
+        if not range_rows:
+            return
+        if current and current_size + range_size > MAX_WRITE_BYTES:
             batches.append(current)
             current, current_size = [], 0
-        current.append(piece)
-        current_size += size
+        current.append(
+            {
+                "range": f"{_a1_prefix(range_name)}!A{range_start + 1}",
+                "values": range_rows,
+            }
+        )
+        current_size += range_size
+        range_rows, range_size = [], 0
+
+    for tab in tabs:
+        for row_number, row in enumerate(tab.rows):
+            row_size = _size([row])
+            if range_rows and range_size + row_size > MAX_WRITE_BYTES:
+                append_range()
+            if not range_rows:
+                range_name = tab.name
+                range_start = row_number
+            range_rows.append(row)
+            range_size += row_size
+        append_range()
     if current:
         batches.append(current)
     return batches
