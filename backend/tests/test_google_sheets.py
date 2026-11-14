@@ -10,7 +10,6 @@ from michael_s_molina.sqllab_gsheets.google_sheets import (
     check_cell_limit,
     create_spreadsheet,
     GoogleExportError,
-    tab_label,
     Tab,
 )
 
@@ -160,20 +159,6 @@ def test_date_columns_formatted(app, google):
     } in [
         r["repeatCell"]["cell"]["userEnteredFormat"] for r in fmt if "repeatCell" in r
     ]
-
-
-@pytest.mark.parametrize(
-    "cid, name, i, expected",
-    [
-        (7, "Sales", 0, "7 - Sales"),
-        (7, "Sales", 2, "7.2 - Sales"),
-        (None, "Untitled chart", 0, "Untitled chart"),
-        (None, "Untitled chart", 1, "Untitled chart (1)"),
-        (0, "Sales", 0, "Sales"),
-    ],
-)
-def test_tab_label(cid, name, i, expected):
-    assert tab_label(cid, name, i) == expected
 
 
 def test_cell_limit_counts_header_rows_across_tabs():

@@ -50,14 +50,6 @@ class GoogleExportError(Exception):
         super().__init__("Couldn't create the Google Sheet. Try again later.")
 
 
-def tab_label(chart_id: int | None, chart_name: str, index: int) -> str:
-    # Drill By sends slice_id 0, so a falsy ID means the chart has no identity.
-    if not chart_id:
-        return chart_name if index == 0 else f"{chart_name} ({index})"
-    prefix = str(chart_id) if index == 0 else f"{chart_id}.{index}"
-    return f"{prefix} - {chart_name}"
-
-
 def check_cell_limit(tabs: list[Tab]) -> None:
     """Refuse tabs that would exceed Google's cell limit, before any Google call."""
     cells = sum(len(tab.rows) * len(tab.rows[0]) for tab in tabs if tab.rows)

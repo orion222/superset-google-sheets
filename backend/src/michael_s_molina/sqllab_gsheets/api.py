@@ -11,20 +11,22 @@ from flask import current_app, g, request, Response
 from flask_appbuilder.api import expose, permission_name, protect
 from flask_babel import gettext as __
 from superset_core.common.daos import DatabaseDAO
-from superset_core.exports.export import can_export_data
 from superset_core.queries.types import QueryOptions, QueryStatus
 from superset_core.rest_api.api import RestApi
 from superset_core.rest_api.decorators import api
 
+from .api_helpers import export_error_response
 from .cells import dataframe_rows
+from .chart_api import ChartExportRequest, capabilities, export_chart
 from .config import sql_lab_max_rows
-from .errors import ExportRejected, GENERIC_FAILURE, INVALID_REQUEST
-from .google_sheets import (
-    check_cell_limit,
-    create_spreadsheet,
-    GoogleExportError,
-    Tab,
+from .errors import (
+    ExportRejected,
+    GENERIC_FAILURE,
+    INVALID_REQUEST,
+    is_named_exception,
 )
+from .export_flow import authorize_export, deliver_export, reject_too_many_rows
+from .google_sheets import Tab
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +92,7 @@ def check_sql_access(
         )
     except Exception as ex:
         # Superset is not importable here, so the class is matched by name.
-        if type(ex).__name__ == "SupersetSecurityException":
+        if is_named_exception(ex, "SupersetSecurityException"):
             raise ExportRejected(403, SQL_ACCESS_DENIED) from ex
         logger.exception("SQL Lab access check failed during Google Sheets export")
         raise ExportRejected(500, GENERIC_FAILURE) from ex
@@ -104,8 +106,7 @@ def export_sql(
     email: str | None,
     now: datetime,
 ) -> tuple[str, int]:
-    if not email or not can_export_data():
-        raise ExportRejected(403, "You don't have permission to export to Google Sheets.")
+    email = authorize_export(email)
     # Refused whatever ENABLE_TEMPLATE_PROCESSING says; the flag isn't readable here.
     if any(marker in sql for marker in _JINJA_MARKERS):
         raise ExportRejected(400, TEMPLATED_SQL)
@@ -118,23 +119,11 @@ def export_sql(
         raise ExportRejected(500, GENERIC_FAILURE) from ex
 
     limit = sql_lab_max_rows()
-    if len(df.index) > limit:
-        raise ExportRejected(
-            400,
-            f"Too large for Google Sheets (more than {limit} rows). "
-            "Use Export to .CSV instead.",
-        )
+    reject_too_many_rows(len(df.index), limit)
 
     rows, temporal = dataframe_rows(df)
     tabs = [Tab("Results", rows, temporal)]
-    check_cell_limit(tabs)
-    title = f"SQL Lab export · {now.strftime('%Y-%m-%d %H:%M')} UTC"
-
-    try:
-        url = create_spreadsheet(title, tabs, email)
-    except GoogleExportError as ex:
-        logger.exception("Google Sheets export failed")
-        raise ExportRejected(500, GENERIC_FAILURE) from ex
+    url = deliver_export("SQL Lab export", tabs, email, now)
 
     return url, len(df.index)
 
@@ -181,9 +170,32 @@ class GSheetsExportAPI(RestApi):
                 g.user.email,
                 datetime.now(timezone.utc),
             )
-        except ExportRejected as ex:
-            return self.response(ex.status, message=ex.message)
-        except Exception:
-            logger.exception("Unexpected error in Google Sheets export")
-            return self.response(500, message=GENERIC_FAILURE)
+        except Exception as ex:
+            return export_error_response(self, ex)
         return self.response(200, spreadsheet_url=url, row_count=row_count)
+
+    @expose("/chart/", methods=("POST",))
+    @protect()
+    @permission_name("export")
+    def export_chart_to_sheets(self) -> Response:
+        """Export a chart's query results to a new Google Sheet."""
+        try:
+            chart_request = ChartExportRequest.parse(request.get_json(silent=True))
+            url = export_chart(
+                chart_request,
+                g.user.email,
+                datetime.now(timezone.utc),
+            )
+        except Exception as ex:
+            return export_error_response(self, ex)
+        return self.response(200, spreadsheet_url=url)
+
+    @expose("/chart/capabilities", methods=("GET",))
+    @protect()
+    @permission_name("export")
+    def chart_capabilities(self) -> Response:
+        """Report whether the current user can export charts to Google Sheets."""
+        try:
+            return self.response(200, **capabilities(g.user.email))
+        except Exception as ex:
+            return export_error_response(self, ex)

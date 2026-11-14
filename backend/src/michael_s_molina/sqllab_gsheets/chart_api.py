@@ -1,75 +1,130 @@
-"""Chart export to Google Sheets: the REST endpoints and the export flow behind them."""
+"""Chart request parsing and export flow for Google Sheets."""
 
 from __future__ import annotations
 
-import logging
-from datetime import datetime, timezone
+import math
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
-from flask import g, request, Response
-from flask_appbuilder.api import expose, permission_name, protect
 from superset_core.exports.export import (
     build_tab_name,
-    can_export_data,
     run_query_context,
 )
-from superset_core.rest_api.api import RestApi
-from superset_core.rest_api.decorators import api
+from superset_core.exports.types import ChartQueryResult
 
 from .cells import query_rows, temporal_columns
 from .config import sync_max_rows
-from .errors import ExportRejected, GENERIC_FAILURE, INVALID_REQUEST
-from .google_sheets import (
-    check_cell_limit,
-    create_spreadsheet,
-    Tab,
-    tab_label,
+from .errors import ExportRejected, INVALID_REQUEST, is_named_exception
+from .export_flow import (
+    authorize_export,
+    can_export_user,
+    deliver_export,
+    reject_too_many_rows,
 )
-
-logger = logging.getLogger(__name__)
+from .google_sheets import Tab
 
 TAB_NAME_MAX_LEN = 100
 UNTITLED = "Untitled chart"
+ROW_RESULT_TYPES = frozenset(
+    {"full", "results", "post_processed", "samples", "drill_detail"}
+)
+
+
+@dataclass(frozen=True)
+class ChartExportRequest:
+    payload: dict[str, Any]
+    chart_name: str | None
+
+    @classmethod
+    def parse(cls, body: Any) -> ChartExportRequest:
+        if not isinstance(body, dict):
+            raise ExportRejected(400, INVALID_REQUEST)
+
+        payload = body.get("payload")
+        chart_name = body.get("chartName")
+        if not isinstance(payload, dict) or not payload:
+            raise ExportRejected(400, INVALID_REQUEST)
+        if chart_name is not None and not isinstance(chart_name, str):
+            raise ExportRejected(400, INVALID_REQUEST)
+
+        form_data = payload.get("form_data")
+        queries = payload.get("queries")
+        if form_data is not None and not isinstance(form_data, dict):
+            raise ExportRejected(400, INVALID_REQUEST)
+        chart_id = form_data.get("slice_id") if form_data is not None else None
+        if chart_id is not None and (
+            not isinstance(chart_id, int) or isinstance(chart_id, bool)
+        ):
+            raise ExportRejected(400, INVALID_REQUEST)
+        if queries is not None and (
+            not isinstance(queries, list)
+            or not all(isinstance(query, dict) for query in queries)
+        ):
+            raise ExportRejected(400, INVALID_REQUEST)
+
+        result_types = [payload.get("result_type")]
+        if queries:
+            result_types.extend(query.get("result_type") for query in queries)
+        if any(
+            result_type is not None
+            and (
+                not isinstance(result_type, str)
+                or result_type not in ROW_RESULT_TYPES
+            )
+            for result_type in result_types
+        ):
+            raise ExportRejected(400, INVALID_REQUEST)
+        return cls(payload=payload, chart_name=chart_name)
 
 
 def capabilities(email: str | None) -> dict[str, bool]:
     # The host disables the items for users who can't download, so they stay visible.
-    return {"can_export": bool(email)}
+    return {"can_export": can_export_user(email)}
 
 
-def _run(payload: dict[str, Any]) -> list[Any]:
+def tab_label(chart_id: int | None, chart_name: str, index: int) -> str:
+    # Drill By sends slice_id 0, so a falsy ID means the chart has no identity.
+    if not chart_id:
+        return chart_name if index == 0 else f"{chart_name} ({index})"
+    prefix = str(chart_id) if index == 0 else f"{chart_id}.{index}"
+    return f"{prefix} - {chart_name}"
+
+
+def _chart_id_from_payload(payload: dict[str, Any]) -> int | None:
+    form_data = payload.get("form_data")
+    if not isinstance(form_data, dict):
+        return None
+    chart_id = form_data.get("slice_id")
+    if isinstance(chart_id, int) and not isinstance(chart_id, bool):
+        return chart_id
+    return None
+
+
+def _run(payload: dict[str, Any]) -> list[ChartQueryResult]:
     try:
         return run_query_context(payload)
     except Exception as ex:
         # Superset is not importable here, so the class is matched by name.
-        name = type(ex).__name__
-        if name == "SupersetSecurityException":
+        if is_named_exception(ex, "SupersetSecurityException"):
             raise ExportRejected(403, "You don't have access to this chart.") from ex
-        if name in ("ValidationError", "ValueError"):
-            logger.warning("Rejected chart query payload: %s", ex)
+        if is_named_exception(ex, "ValidationError", module="marshmallow"):
             raise ExportRejected(400, INVALID_REQUEST) from ex
-        logger.exception("Chart query failed during Google Sheets export")
-        raise ExportRejected(500, GENERIC_FAILURE) from ex
+        raise
 
 
-def _validate(payload: Any, chart_name: Any) -> None:
-    form_data = payload.get("form_data") if isinstance(payload, dict) else None
-    valid = (
-        isinstance(payload, dict)
-        and bool(payload)
-        and (form_data is None or isinstance(form_data, dict))
-        and (chart_name is None or isinstance(chart_name, str))
-    )
-    if not valid:
-        raise ExportRejected(400, INVALID_REQUEST)
-
-
-def _tabs(payload: dict[str, Any], name: str, results: list[Any]) -> list[Tab]:
-    chart_id = (payload.get("form_data") or {}).get("slice_id")
+def _tabs(
+    chart_request: ChartExportRequest, name: str, results: list[ChartQueryResult]
+) -> list[Tab]:
     used: set[str] = set()
+    chart_id = _chart_id_from_payload(chart_request.payload)
     return [
         Tab(
-            build_tab_name(tab_label(chart_id, name, index), used, TAB_NAME_MAX_LEN),
+            build_tab_name(
+                tab_label(chart_id, name, index),
+                used,
+                TAB_NAME_MAX_LEN,
+            ),
             query_rows(result),
             temporal_columns(result),
         )
@@ -77,82 +132,57 @@ def _tabs(payload: dict[str, Any], name: str, results: list[Any]) -> list[Tab]:
     ]
 
 
+def _bounded_row_limit(row_limit: Any, row_cap: int) -> Any:
+    if row_limit is None:
+        return row_cap
+    if isinstance(row_limit, bool):
+        row_limit = int(row_limit)
+    elif isinstance(row_limit, str):
+        try:
+            row_limit = int(row_limit)
+        except ValueError:
+            return row_limit
+    elif isinstance(row_limit, float) and math.isfinite(row_limit):
+        row_limit = int(row_limit)
+    if not isinstance(row_limit, int):
+        return row_limit
+    return min(row_limit, row_cap) if row_limit > 0 else row_cap
+
+
+def _capped_query_context(payload: dict[str, Any], row_cap: int) -> dict[str, Any]:
+    queries = payload.get("queries")
+    if not isinstance(queries, list):
+        return payload
+
+    capped_queries: list[Any] = []
+    for query in queries:
+        if not isinstance(query, dict):
+            capped_queries.append(query)
+            continue
+        capped_query = dict(query)
+        capped_query["row_limit"] = _bounded_row_limit(
+            capped_query.get("row_limit"), row_cap
+        )
+        capped_queries.append(capped_query)
+
+    return {**payload, "queries": capped_queries}
+
+
 def export_chart(
-    payload: Any,
-    chart_name: Any,
+    chart_request: ChartExportRequest,
     email: str | None,
     now: datetime,
 ) -> str:
-    if not email or not can_export_data():
-        raise ExportRejected(403, "You don't have permission to export to Google Sheets.")
-    _validate(payload, chart_name)
+    email = authorize_export(email)
 
+    limit = sync_max_rows()
+    payload = _capped_query_context(chart_request.payload, limit + 1)
     results = _run(payload)
 
     total = sum(len(result.data) for result in results)
-    limit = sync_max_rows()
     if total > limit:
-        raise ExportRejected(
-            400,
-            f"Too large for Google Sheets ({total} rows, limit {limit}). "
-            "Use Export to .CSV instead.",
-        )
+        reject_too_many_rows(total, limit)
 
-    name = chart_name or UNTITLED
-    title = f"{name} · {now.strftime('%Y-%m-%d %H:%M')} UTC"
-
-    try:
-        tabs = _tabs(payload, name, results)
-    except Exception as ex:
-        logger.exception("Couldn't build Google Sheets tabs for the chart")
-        raise ExportRejected(500, GENERIC_FAILURE) from ex
-    check_cell_limit(tabs)
-
-    try:
-        return create_spreadsheet(title, tabs, email)
-    except Exception as ex:
-        logger.exception("Google Sheets export failed")
-        raise ExportRejected(500, GENERIC_FAILURE) from ex
-
-
-@api(id="sqllab_gsheets_chart", name="Google Sheets chart export")
-class ChartExportAPI(RestApi):
-    class_permission_name = "GoogleSheets"
-
-    @expose("/chart/", methods=("POST",))
-    @protect()
-    @permission_name("export")
-    def export_to_sheets(self) -> Response:
-        """Export a chart's query results to a new Google Sheet.
-
-        Request body:
-            payload: The chart's query context, as sent to /api/v1/chart/data
-            chartName: Name used for the spreadsheet title and tabs
-        """
-        try:
-            body = request.get_json(silent=True)
-            if not isinstance(body, dict):
-                raise ExportRejected(400, INVALID_REQUEST)
-            url = export_chart(
-                body.get("payload"),
-                body.get("chartName"),
-                g.user.email,
-                datetime.now(timezone.utc),
-            )
-        except ExportRejected as ex:
-            return self.response(ex.status, message=ex.message)
-        except Exception:
-            logger.exception("Unexpected error in Google Sheets export")
-            return self.response(500, message=GENERIC_FAILURE)
-        return self.response(200, url=url)
-
-    @expose("/chart/capabilities", methods=("GET",))
-    @protect()
-    @permission_name("export")
-    def chart_capabilities(self) -> Response:
-        """Report whether the current user can export charts to Google Sheets."""
-        try:
-            return self.response(200, **capabilities(g.user.email))
-        except Exception:
-            logger.exception("Unexpected error in Google Sheets capabilities check")
-            return self.response(500, message=GENERIC_FAILURE)
+    name = chart_request.chart_name or UNTITLED
+    tabs = _tabs(chart_request, name, results)
+    return deliver_export(name, tabs, email, now)

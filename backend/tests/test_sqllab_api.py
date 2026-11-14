@@ -19,6 +19,7 @@ from michael_s_molina.sqllab_gsheets.errors import ExportRejected
 from michael_s_molina.sqllab_gsheets.google_sheets import GoogleExportError, Tab
 
 MODULE = "michael_s_molina.sqllab_gsheets.api"
+FLOW = "michael_s_molina.sqllab_gsheets.export_flow"
 NOW = datetime(2026, 11, 3, 10, 5, tzinfo=timezone.utc)
 DB = MagicMock(name="database")
 GENERIC = "Couldn't create the Google Sheet. Try again later."
@@ -28,14 +29,18 @@ class SupersetSecurityException(Exception):
     """Stands in for the exception class Superset raises on denied access."""
 
 
+class ChildSupersetSecurityException(SupersetSecurityException):
+    """Stands in for a specialized security exception."""
+
+
 @pytest.fixture
 def m(app):
     sm = MagicMock(name="security_manager")
     sm.can_access.return_value = True
     with (
         patch(f"{MODULE}.execute_query") as run,
-        patch(f"{MODULE}.can_export_data", return_value=True) as can,
-        patch(f"{MODULE}.create_spreadsheet") as create,
+        patch(f"{FLOW}.can_export_data", return_value=True) as can,
+        patch(f"{FLOW}.create_spreadsheet") as create,
         patch(f"{MODULE}.current_app", MagicMock(appbuilder=MagicMock(sm=sm))),
     ):
         run.return_value = pd.DataFrame({"a": [1]})
@@ -92,6 +97,14 @@ def test_sql_export_requires_table_access(app, m):
         export_sql(DB, "select * from secret_table", "c", "s", "u@x.com", NOW)
     assert (e.value.status, e.value.message) == (403, SQL_ACCESS_DENIED)
     assert "secret_table" not in e.value.message
+    m.execute.assert_not_called()
+
+
+def test_sql_export_recognizes_security_exception_subclasses(app, m):
+    m.security_manager.raise_for_access.side_effect = ChildSupersetSecurityException()
+    with pytest.raises(ExportRejected) as e:
+        export_sql(DB, "select 1", None, None, "u@x.com", NOW)
+    assert (e.value.status, e.value.message) == (403, SQL_ACCESS_DENIED)
     m.execute.assert_not_called()
 
 
@@ -160,6 +173,27 @@ def test_sql_export_google_failure_is_generic(app, m):
     with pytest.raises(ExportRejected) as e:
         export_sql(DB, "select 1", None, None, "u@x.com", NOW)
     assert e.value.status == 500 and e.value.message == GENERIC
+
+
+def test_sql_export_does_not_log_google_failure_twice(app, m, caplog):
+    import logging
+
+    def fail(*_args):
+        logging.getLogger("michael_s_molina.sqllab_gsheets.google_sheets").error(
+            "Google Sheets export failed"
+        )
+        raise GoogleExportError()
+
+    m.create_spreadsheet.side_effect = fail
+    with pytest.raises(ExportRejected):
+        export_sql(DB, "select 1", None, None, "u@x.com", NOW)
+    assert (
+        sum(
+            record.message == "Google Sheets export failed"
+            for record in caplog.records
+        )
+        == 1
+    )
 
 
 def test_execute_query_caps_rows_one_past_the_sync_limit(app):
