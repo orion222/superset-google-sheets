@@ -49,13 +49,13 @@ Use shared backend helpers for authorization, row-cap rejection, spreadsheet del
   - [x] Cap queries without mutating caller input `#bounded-chart-query`
   - [x] Keep tab naming in chart code and test deduplication with the real builder `#chart-tab-names`
   - [x] Match capability reporting to the export permission predicate `#capability-check`
-- [~] Publish the reviewed changes and replies to PR #4 `#publish-pr4-review-fixes`
-  - [~] Commit and push to PR #4's current head branch `#push-pr4-changes`
-  - [ ] Reply to each of the ten inline review comments `#reply-pr4-comments`
+- [x] Publish the reviewed changes and replies to PR #4 `#publish-pr4-review-fixes`
+  - [x] Commit and push to PR #4's current head branch `#push-pr4-changes`
+  - [x] Reply to each of the ten inline review comments `#reply-pr4-comments`
 
 ### Test
-- [~] Run the full backend test suite on the pushed commit and register its result `#backend-suite`
-- [~] Run mypy, compileall, and committed-diff checks; report unavailable lint tooling `#static-checks`
+- [x] Run the full backend test suite on the pushed commit and register its result `#backend-suite`
+- [x] Run mypy, compileall, and committed-diff checks; report unavailable lint tooling `#static-checks`
 - [x] Recheck all nine findings and inspect the final diff `#final-review`
 
 ### Review
