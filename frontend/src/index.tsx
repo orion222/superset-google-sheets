@@ -1,7 +1,8 @@
 import { sqlLab, commands, menus, toasts } from '@apache-superset/core';
 import { exportChart } from './chartExport';
+import { exportDashboard } from './dashboardExport';
 import { EXTENSION_BASE, getJson, postJson } from './client';
-import { ChartDownloadContext } from './coreTypes';
+import { ChartDownloadContext, DashboardDownloadContext } from './coreTypes';
 
 const CHART_LOCATIONS = [
   'explore.chart.download',
@@ -30,12 +31,16 @@ async function exportSqlLab(): Promise<void> {
   const sql = editor.getValue()?.trim();
 
   if (!sql) {
-    toasts.addWarningToast('No SQL query to export. Please write a query first.');
+    toasts.addWarningToast(
+      'No SQL query to export. Please write a query first.',
+    );
     return;
   }
 
   if (!currentTab.databaseId) {
-    toasts.addWarningToast('No database selected. Please select a database first.');
+    toasts.addWarningToast(
+      'No database selected. Please select a database first.',
+    );
     return;
   }
 
@@ -44,20 +49,23 @@ async function exportSqlLab(): Promise<void> {
   });
 
   try {
-    const data = await postJson<{ spreadsheet_url?: string; row_count: number }>(
-      `${EXTENSION_BASE}/export/`,
-      {
-        sql,
-        databaseId: currentTab.databaseId,
-        catalog: currentTab.catalog,
-        schema: currentTab.schema,
-      },
-    );
+    const data = await postJson<{
+      spreadsheet_url?: string;
+      row_count: number;
+    }>(`${EXTENSION_BASE}/export/`, {
+      sql,
+      databaseId: currentTab.databaseId,
+      catalog: currentTab.catalog,
+      schema: currentTab.schema,
+    });
     if (data.spreadsheet_url) {
-      toasts.addSuccessToast(`Exported ${data.row_count} rows to Google Sheets`, {
-        duration: 0,
-        link: { href: data.spreadsheet_url, label: SHEETS_LINK_LABEL },
-      });
+      toasts.addSuccessToast(
+        `Exported ${data.row_count} rows to Google Sheets`,
+        {
+          duration: 0,
+          link: { href: data.spreadsheet_url, label: SHEETS_LINK_LABEL },
+        },
+      );
     }
   } catch (error) {
     toasts.addDangerToast(
@@ -120,6 +128,30 @@ getJson<{ can_export: boolean }>(`${EXTENSION_BASE}/chart/capabilities`)
   .then(({ can_export }) => {
     if (can_export) {
       register();
+    }
+  })
+  .catch(() => undefined);
+
+// Dashboard exports additionally require the asynchronous task infrastructure.
+getJson<{ can_export: boolean }>(`${EXTENSION_BASE}/dashboard/capabilities`)
+  .then(({ can_export }) => {
+    if (can_export) {
+      commands.registerCommand(
+        {
+          id: 'sqllab_gsheets.exportDashboard',
+          title: 'Export to Google Sheets',
+          description: 'Export dashboard data to Google Sheets',
+        },
+        (ctx: DashboardDownloadContext) => exportDashboard(ctx),
+      );
+      menus.registerMenuItem(
+        {
+          view: 'dashboard.download',
+          command: 'sqllab_gsheets.exportDashboard',
+        },
+        'dashboard.download',
+        'primary',
+      );
     }
   })
   .catch(() => undefined);
