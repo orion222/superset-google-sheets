@@ -2,6 +2,10 @@ GENERIC_FAILURE = "Couldn't create the Google Sheet. Try again later."
 INVALID_REQUEST = "Invalid export request."
 
 
+class GoogleSheetsConfigError(Exception):
+    """Raised when a required GSHEETS_* setting is missing or invalid."""
+
+
 class ExportRejected(Exception):
     """An export refused with an HTTP status and a message safe to show the user."""
 
