@@ -56,7 +56,10 @@ beforeEach(() => {
     .mockResolvedValue({ status: 'success', payload: { url: URL } });
 });
 
-test('submits the native-filter snapshot and opens the successful task result through a toast', async () => {
+test('submits dashboard filters and opens the successful task result through a toast', async () => {
+  jest.mocked(toasts.addInfoToast)
+    .mockReturnValueOnce('preparing-id')
+    .mockReturnValueOnce('watching-id');
   await exportDashboard(ctx);
   expect(post).toHaveBeenCalledWith(`${EXTENSION_BASE}/dashboard/`, {
     dashboardId: 42,
@@ -72,7 +75,9 @@ test('submits the native-filter snapshot and opens the successful task result th
       link: { href: URL, label: 'Open in Google Sheets' },
     },
   );
-  expect(toasts.removeToast).toHaveBeenCalledWith('pending-id');
+  expect(toasts.removeToast).toHaveBeenNthCalledWith(1, 'preparing-id');
+  expect(toasts.removeToast).toHaveBeenNthCalledWith(2, 'watching-id');
+  expect(toasts.removeToast).toHaveBeenCalledTimes(2);
   expect(toasts.addDangerToast).not.toHaveBeenCalled();
   expect(toasts.addInfoToast).toHaveBeenLastCalledWith(
     'Dashboard export started…',
@@ -90,10 +95,25 @@ test('submission errors show a generic message and always dismiss the pending to
   expect(poll).not.toHaveBeenCalled();
 });
 
-test.each(['failure', 'aborted', 'timed_out'] as const)(
-  'terminal %s tasks never show success or task error details',
-  async status => {
-    poll.mockResolvedValue({ status });
+test('shows the public worker failure message without a success toast', async () => {
+  const message = 'No dashboard charts could be exported to Google Sheets.';
+  poll.mockResolvedValue({
+    status: 'failure',
+    payload: { error_message: message },
+  });
+  await exportDashboard(ctx);
+  expect(toasts.addDangerToast).toHaveBeenCalledWith(message);
+  expect(toasts.addSuccessToast).not.toHaveBeenCalled();
+});
+
+test.each([
+  { status: 'failure' },
+  { status: 'failure', payload: { error_message: ['malformed detail'] } },
+  { status: 'timed_out' },
+] satisfies TaskResult[])(
+  'falls back to a generic error for $status without a usable message',
+  async task => {
+    poll.mockResolvedValue(task);
     await exportDashboard(ctx);
     expect(toasts.addDangerToast).toHaveBeenCalledWith(
       'Dashboard export failed. Please try again.',
@@ -102,6 +122,19 @@ test.each(['failure', 'aborted', 'timed_out'] as const)(
     expect(toasts.removeToast).toHaveBeenCalledWith('pending-id');
   },
 );
+
+test('does not report a task cancelled from the task list as a failure', async () => {
+  poll.mockResolvedValue({
+    status: 'aborted',
+    payload: {
+      error_message: 'The dashboard export was cancelled or timed out.',
+    },
+  });
+  await exportDashboard(ctx);
+  expect(toasts.addDangerToast).not.toHaveBeenCalled();
+  expect(toasts.addSuccessToast).not.toHaveBeenCalled();
+  expect(toasts.removeToast).toHaveBeenCalledTimes(2);
+});
 
 test('success without a URL is treated as a failure', async () => {
   poll.mockResolvedValue({ status: 'success', payload: {} });
@@ -191,26 +224,7 @@ test('a context without download permission does not submit an export', async ()
   await exportDashboard({ ...ctx, canDownload: false });
   expect(post).not.toHaveBeenCalled();
   expect(toasts.addInfoToast).not.toHaveBeenCalled();
-});
-
-test('captures filters before submission can yield to authentication', async () => {
-  const mask: DashboardDownloadContext['activeDataMask'] = {
-    'NATIVE_FILTER-1': {
-      extraFormData: { filters: ['first'] },
-      filterState: { value: ['first'] },
-    },
-  };
-  const exporting = exportDashboard({ ...ctx, activeDataMask: mask });
-  mask['NATIVE_FILTER-1'].extraFormData = { filters: ['changed'] };
-  mask['NATIVE_FILTER-1'].filterState.value = ['changed'];
-  await exporting;
-  expect(post).toHaveBeenCalledWith(`${EXTENSION_BASE}/dashboard/`, {
-    dashboardId: 42,
-    activeDataMask: {
-      'NATIVE_FILTER-1': {
-        extraFormData: { filters: ['first'] },
-        filterState: { value: ['first'] },
-      },
-    },
-  });
+  expect(toasts.addDangerToast).toHaveBeenCalledWith(
+    "You don't have permission to export this dashboard.",
+  );
 });

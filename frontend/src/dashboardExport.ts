@@ -27,13 +27,52 @@ const STATUS_FAILURE_MESSAGE =
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const activeExports = new Map<string, Promise<void>>();
 
-/** Captures the JSON wire representation before authentication or submission yields. */
-function snapshotDataMask(
-  mask: DashboardDownloadContext['activeDataMask'],
-): DashboardDownloadContext['activeDataMask'] {
-  return JSON.parse(
-    JSON.stringify(mask),
-  ) as DashboardDownloadContext['activeDataMask'];
+interface ExportSubmission {
+  task_id: string;
+  already_running: boolean;
+}
+
+async function watchTask(
+  taskId: string,
+  alreadyRunning: boolean,
+  signal: AbortSignal,
+): Promise<void> {
+  const pendingId = toasts.addInfoToast(
+    alreadyRunning
+      ? 'Dashboard export already in progress…'
+      : 'Dashboard export started…',
+    { duration: 0 },
+  );
+  try {
+    const task = await pollTask(taskId, { signal });
+    if (signal.aborted || task.status === 'aborted') {
+      return;
+    }
+    if (task.status !== 'success') {
+      // Only this task payload field contains a public message from the worker.
+      const message = task.payload?.error_message;
+      toasts.addDangerToast(
+        task.status === 'failure' && typeof message === 'string' && message.trim()
+          ? message
+          : FAILURE_MESSAGE,
+      );
+      return;
+    }
+    const url = task.payload?.url;
+    if (typeof url !== 'string' || !url) {
+      throw new Error('Dashboard export did not return a spreadsheet URL');
+    }
+    toasts.addSuccessToast('Dashboard sent to Google Sheets', {
+      duration: 0,
+      link: { href: url, label: 'Open in Google Sheets' },
+    });
+  } catch (error) {
+    if (!signal.aborted && !(error instanceof TaskPollingCancelled)) {
+      toasts.addDangerToast(STATUS_FAILURE_MESSAGE);
+    }
+  } finally {
+    toasts.removeToast(pendingId);
+  }
 }
 
 /** Queues a dashboard export and follows its task, sharing a watcher for repeated clicks. */
@@ -41,80 +80,51 @@ export async function exportDashboard(
   ctx: DashboardDownloadContext,
 ): Promise<void> {
   if (!ctx.canDownload) {
-    toasts.addDangerToast(FAILURE_MESSAGE);
+    toasts.addDangerToast("You don't have permission to export this dashboard.");
     return;
   }
-  let pendingId = toasts.addInfoToast(
-    'Preparing dashboard export to Google Sheets…',
-    {
-      duration: 0,
-    },
-  );
   const controller = new AbortController();
+  const { signal } = controller;
   const cancel = () => controller.abort();
   window.addEventListener('pagehide', cancel, { once: true });
-  let ownsPendingToast = true;
   try {
-    const activeDataMask = snapshotDataMask(ctx.activeDataMask);
-    const data = await postJson<{ task_id: string; already_running: boolean }>(
-      `${EXTENSION_BASE}/dashboard/`,
-      { dashboardId: ctx.dashboardId, activeDataMask },
+    const preparingId = toasts.addInfoToast(
+      'Preparing dashboard export to Google Sheets…',
+      { duration: 0 },
     );
-    if (controller.signal.aborted) {
-      throw new TaskPollingCancelled();
+    let data: ExportSubmission;
+    try {
+      data = await postJson<ExportSubmission>(`${EXTENSION_BASE}/dashboard/`, {
+        dashboardId: ctx.dashboardId,
+        activeDataMask: ctx.activeDataMask,
+      });
+      if (!data || typeof data.task_id !== 'string' || !UUID.test(data.task_id)) {
+        throw new Error('Invalid export response');
+      }
+    } catch {
+      if (!signal.aborted) {
+        toasts.addDangerToast(FAILURE_MESSAGE);
+      }
+      return;
+    } finally {
+      toasts.removeToast(preparingId);
     }
-    if (!data || typeof data.task_id !== 'string' || !UUID.test(data.task_id)) {
-      throw new Error('Invalid export response');
+    if (signal.aborted) {
+      return;
     }
-    toasts.removeToast(pendingId);
-    ownsPendingToast = false;
     const existing = activeExports.get(data.task_id);
     if (existing) {
       await existing;
       return;
     }
-    pendingId = toasts.addInfoToast(
-      data.already_running
-        ? 'Dashboard export already in progress…'
-        : 'Dashboard export started…',
-      { duration: 0 },
-    );
-    ownsPendingToast = true;
-    const watching = pollTask(data.task_id, { signal: controller.signal })
-      .then(task => {
-        const url = task.payload?.url;
-        if (task.status !== 'success') {
-          toasts.addDangerToast(FAILURE_MESSAGE);
-          return;
-        }
-        if (typeof url !== 'string' || !url) {
-          throw new Error('Dashboard export did not return a spreadsheet URL');
-        }
-        toasts.addSuccessToast('Dashboard sent to Google Sheets', {
-          duration: 0,
-          link: { href: url, label: 'Open in Google Sheets' },
-        });
-      })
-      .catch(error => {
-        if (!(error instanceof TaskPollingCancelled)) {
-          toasts.addDangerToast(STATUS_FAILURE_MESSAGE);
-        }
-      })
-      .finally(() => {
-        activeExports.delete(data.task_id);
-        toasts.removeToast(pendingId);
-      });
+    const watching = watchTask(data.task_id, data.already_running, signal);
     activeExports.set(data.task_id, watching);
-    ownsPendingToast = false;
-    await watching;
-  } catch (error) {
-    if (!(error instanceof TaskPollingCancelled)) {
-      toasts.addDangerToast(FAILURE_MESSAGE);
+    try {
+      await watching;
+    } finally {
+      activeExports.delete(data.task_id);
     }
   } finally {
     window.removeEventListener('pagehide', cancel);
-    if (ownsPendingToast) {
-      toasts.removeToast(pendingId);
-    }
   }
 }

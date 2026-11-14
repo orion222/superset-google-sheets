@@ -19,17 +19,16 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from threading import Event
-from typing import Any, cast
+from typing import Any
 
-from flask import current_app, g
+from flask import g
 from superset_core.exports.export import (
     as_user,
     build_tab_name,
-    can_export_dashboard,
-    can_export_data,
     describe_dashboard_export,
     iter_dashboard_chart_results,
 )
@@ -37,10 +36,18 @@ from superset_core.exports.types import ChartResult, DashboardExportInfo, SkipRe
 from superset_core.tasks.decorators import get_context, task
 from superset_core.tasks.types import TaskScope
 
-from .about_tab import ExportedTab, SkippedChart, build_about_tab
+from .about_tab import ABOUT_COLUMNS, ExportedTab, SkippedChart, build_about_tab
 from .cells import query_rows, temporal_columns
 from .config import DEFAULT_EXPORT_TIMEOUT_SECONDS
-from .google_sheets import MAX_CELLS, Tab, create_spreadsheet, tab_label
+from .dashboard_permissions import dashboard_export_allowed
+from .google_sheets import (
+    MAX_CELLS,
+    Tab,
+    create_spreadsheet,
+    query_cells,
+    tab_cells,
+    tab_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +57,7 @@ NO_CHARTS = "No dashboard charts could be exported to Google Sheets."
 CELL_LIMIT = "The chart exceeds the remaining spreadsheet cell limit."
 CHART_FAILED = "The chart could not be exported."
 CANCELLED = "The dashboard export was cancelled or timed out."
+METADATA_LIMIT = "The dashboard metadata exceeds the spreadsheet cell limit."
 
 
 class DashboardExportError(RuntimeError):
@@ -62,16 +70,9 @@ class DashboardExportAborted(DashboardExportError):
 
 @dataclass(frozen=True)
 class _ChartTabs:
-    chart_id: int
-    chart_name: str
     tabs: list[Tab]
     mappings: list[ExportedTab]
     cells: int
-
-
-def _cell_count(tab: Tab) -> int:
-    """Count allocated rectangular cells, including headers and blank values."""
-    return len(tab.rows) * max((len(row) for row in tab.rows), default=0)
 
 
 def _skip(chart: ChartResult, reason: str) -> SkippedChart:
@@ -88,64 +89,65 @@ def _skip_reason(reason: SkipReason) -> str:
 
 def _require_access(dashboard_id: int) -> str:
     """Recheck queued work against the requesting user's effective grants."""
-    sm = cast(Any, current_app).appbuilder.sm
     email = getattr(g.user, "email", None)
-    if (
-        not email
-        or not sm.can_access("can_export", "GoogleSheets")
-        or not can_export_data()
-        or not can_export_dashboard(dashboard_id)
-    ):
+    if not dashboard_export_allowed(email, dashboard_id):
         raise DashboardExportError(ACCESS_DENIED)
     return str(email)
 
 
-def _chart_tabs(
-    chart: ChartResult, info: DashboardExportInfo, used: set[str]
-) -> _ChartTabs:
-    """Convert all queries together so a failing chart is never partially exported."""
+def _classify(
+    chart: ChartResult, info: DashboardExportInfo, used: set[str], remaining: int
+) -> _ChartTabs | SkippedChart:
+    """Convert a chart only if all its tabs and metadata fit the remaining budget."""
+    if chart.skipped_reason is not None:
+        return _skip(chart, _skip_reason(chart.skipped_reason))
     if not chart.queries or any(not query.colnames for query in chart.queries):
-        raise ValueError("The chart has no tabular query results")
-    tabs: list[Tab] = []
+        return _skip(chart, CHART_FAILED)
+    # The first mapping row is reserved; only extra tab mappings count here.
+    cells = sum(query_cells(query) for query in chart.queries) + ABOUT_COLUMNS * (
+        len(chart.queries) - 1
+    )
+    if cells > remaining:
+        return _skip(chart, CELL_LIMIT)
+
+    try:
+        # Don't allocate names until every query is convertible.
+        tabs = [
+            Tab("", query_rows(query), temporal_columns(query))
+            for query in chart.queries
+        ]
+    except Exception:
+        logger.exception("Couldn't prepare dashboard chart %s", chart.chart_id)
+        return _skip(chart, CHART_FAILED)
+
     mappings: list[ExportedTab] = []
-    for index, query in enumerate(chart.queries):
+    for index, tab in enumerate(tabs):
         name = build_tab_name(
             tab_label(chart.chart_id, chart.chart_name, index), used, 100
         )
-        tabs.append(Tab(name, query_rows(query), temporal_columns(query)))
+        tabs[index] = Tab(name, tab.rows, tab.temporal_columns)
         mappings.append(
             ExportedTab(
                 name,
                 chart.chart_name,
                 info.chart_urls.get(chart.chart_id, ""),
-                len(query.data),
+                len(tab.rows) - 1,
             )
         )
-    return _ChartTabs(
-        chart.chart_id,
-        chart.chart_name,
-        tabs,
-        mappings,
-        sum(_cell_count(tab) for tab in tabs),
-    )
+    return _ChartTabs(tabs, mappings, cells)
 
 
-def _about(
-    info: DashboardExportInfo,
-    exported_at: datetime,
-    charts: list[_ChartTabs],
-    skipped: list[SkippedChart],
-) -> Tab:
-    return build_about_tab(
-        info,
-        exported_at,
-        [mapping for chart in charts for mapping in chart.mappings],
-        skipped,
-    )
-
-
-def _total_cells(about: Tab, charts: list[_ChartTabs]) -> int:
-    return _cell_count(about) + sum(chart.cells for chart in charts)
+def _check_between_charts(
+    results: Iterator[ChartResult], check_abort: Callable[[], None]
+) -> Iterator[ChartResult]:
+    while True:
+        check_abort()
+        try:
+            chart = next(results)
+        except StopIteration:
+            return
+        check_abort()
+        yield chart
 
 
 @task(
@@ -175,65 +177,45 @@ def run_dashboard_export(
             exported_at = datetime.now(timezone.utc)
             charts: list[_ChartTabs] = []
             used = {"about"}
-            if _cell_count(_about(info, exported_at, charts, skipped)) > MAX_CELLS:
-                raise DashboardExportError(
-                    "The dashboard metadata exceeds the spreadsheet cell limit."
-                )
+            chart_count = len(info.chart_urls)
+            # Every chart needs at least one About row, even if it is skipped.
+            # The base tab also includes the "None" row for zero skipped charts.
+            about_base = build_about_tab(info, exported_at, [], [])
+            remaining = MAX_CELLS - tab_cells(about_base) - chart_count * ABOUT_COLUMNS
+            if remaining < 0:
+                raise DashboardExportError(METADATA_LIMIT)
             results = iter(iter_dashboard_chart_results(dashboard_id, active_data_mask))
-            processed = 0
-            while True:
-                check_abort()
-                try:
-                    chart = next(results)
-                except StopIteration:
-                    break
-                check_abort()
-                processed += 1
-                if chart.skipped_reason is not None:
-                    skipped.append(_skip(chart, _skip_reason(chart.skipped_reason)))
-                elif (
-                    sum(
-                        (len(query.data) + 1) * len(query.colnames)
-                        for query in chart.queries
-                    )
-                    > MAX_CELLS
-                ):
-                    # Skip oversized results before copying their records into cells.
-                    skipped.append(_skip(chart, CELL_LIMIT))
+            for processed, chart in enumerate(
+                _check_between_charts(results, check_abort), 1
+            ):
+                if processed > chart_count:
+                    # Reserve a row for charts added after metadata was read.
+                    remaining -= ABOUT_COLUMNS
+                    if remaining < 0:
+                        raise DashboardExportError(METADATA_LIMIT)
+                result = _classify(chart, info, used, remaining)
+                if isinstance(result, SkippedChart):
+                    if not skipped:
+                        # A skip replaces the placeholder "None" row.
+                        remaining += ABOUT_COLUMNS
+                    skipped.append(result)
                 else:
-                    candidate_names = used.copy()
-                    try:
-                        candidate = _chart_tabs(chart, info, candidate_names)
-                    except Exception:
-                        logger.exception(
-                            "Couldn't prepare dashboard chart %s", chart.chart_id
-                        )
-                        skipped.append(_skip(chart, CHART_FAILED))
-                    else:
-                        candidates = [*charts, candidate]
-                        about = _about(info, exported_at, candidates, skipped)
-                        if _total_cells(about, candidates) > MAX_CELLS:
-                            skipped.append(_skip(chart, CELL_LIMIT))
-                        else:
-                            charts = candidates
-                            used = candidate_names
+                    charts.append(result)
+                    remaining -= result.cells
                 context.update_task(
-                    progress=0.8 * min(processed / max(1, len(info.chart_urls)), 1)
+                    progress=0.8 * min(processed / max(1, chart_count), 1)
                 )
 
-            # Later skip descriptions also consume cells; drop whole charts until
-            # the final About tab and every data tab fit together.
-            about = _about(info, exported_at, charts, skipped)
-            while charts and _total_cells(about, charts) > MAX_CELLS:
-                removed = charts.pop()
-                skipped.append(
-                    SkippedChart(removed.chart_id, removed.chart_name, CELL_LIMIT)
-                )
-                about = _about(info, exported_at, charts, skipped)
             if not charts:
                 raise DashboardExportError(NO_CHARTS)
             check_abort()
             email = _require_access(dashboard_id)
+            about = build_about_tab(
+                info,
+                exported_at,
+                [mapping for chart in charts for mapping in chart.mappings],
+                skipped,
+            )
             context.update_task(progress=0.85)
             url = create_spreadsheet(
                 f"{info.title} · {exported_at.strftime('%Y-%m-%d %H:%M')} UTC",
@@ -241,8 +223,8 @@ def run_dashboard_export(
                 email,
                 checkpoint=check_abort,
             )
-            # The writer's final checkpoint is the commit point; publishing its
-            # returned URL must not strand a completed file on a late abort.
+            # The spreadsheet is committed once sharing completes. Publish its
+            # URL even if an abort arrives after the final write.
             context.update_task(
                 progress=1.0,
                 payload={
@@ -268,6 +250,8 @@ def run_dashboard_export(
             },
             immediate=True,
         )
+        if isinstance(ex, DashboardExportAborted):
+            raise
         if aborted.is_set():
             raise DashboardExportAborted(message) from ex
         if isinstance(ex, DashboardExportError):

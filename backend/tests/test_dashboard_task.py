@@ -28,8 +28,9 @@ from unittest.mock import MagicMock
 import pytest
 from flask import Flask, g, has_request_context
 from flask_appbuilder.security.manager import BaseSecurityManager
+from michael_s_molina.sqllab_gsheets import dashboard_permissions
 from michael_s_molina.sqllab_gsheets import dashboard_task as worker
-from michael_s_molina.sqllab_gsheets.google_sheets import Tab
+from michael_s_molina.sqllab_gsheets.google_sheets import Tab, tab_cells
 from superset_core.exports.types import (
     AppliedFilter,
     ChartQueryResult,
@@ -137,8 +138,10 @@ def m(app: Flask, monkeypatch: pytest.MonkeyPatch) -> _Mocks:
     monkeypatch.setattr(worker, "get_context", lambda: context)
     monkeypatch.setattr(worker, "as_user", as_user)
     monkeypatch.setattr(worker, "build_tab_name", tab_name)
-    monkeypatch.setattr(worker, "can_export_data", data_permission)
-    monkeypatch.setattr(worker, "can_export_dashboard", dashboard_permission)
+    monkeypatch.setattr(dashboard_permissions, "can_export_data", data_permission)
+    monkeypatch.setattr(
+        dashboard_permissions, "can_export_dashboard", dashboard_permission
+    )
     monkeypatch.setattr(worker, "describe_dashboard_export", metadata)
     monkeypatch.setattr(worker, "iter_dashboard_chart_results", results)
     monkeypatch.setattr(worker, "create_spreadsheet", create)
@@ -268,7 +271,7 @@ def test_cell_budget_includes_about_and_skips_oversized_chart(
 
     tabs = m.create.call_args.args[1]
     assert [tab.name for tab in tabs] == ["About", "7 - Sales"]
-    assert sum(worker._cell_count(tab) for tab in tabs) <= 100
+    assert sum(map(tab_cells, tabs)) <= 100
     assert m.context.payload["skipped_charts"] == [
         {
             "chart_id": 8,
@@ -297,7 +300,8 @@ def test_metadata_alone_over_limit_fails_before_querying(
 def test_later_skip_rows_cannot_overflow_final_about_budget(
     m: _Mocks, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(worker, "MAX_CELLS", 54)
+    m.metadata.return_value.chart_urls[9] = "/explore/?slice_id=9"
+    monkeypatch.setattr(worker, "MAX_CELLS", 62)
     m.results.side_effect = lambda *_: iter(
         [
             _chart(),
@@ -305,14 +309,34 @@ def test_later_skip_rows_cannot_overflow_final_about_budget(
             ChartResult(9, "Broken too", [], SkipReason.GENERAL),
         ]
     )
-    with pytest.raises(worker.DashboardExportError, match=worker.NO_CHARTS):
-        worker.run_dashboard_export(4, {}, 42)
-    m.create.assert_not_called()
-    assert m.context.payload["skipped_charts"][-1] == {
-        "chart_id": 7,
-        "chart_name": "Sales",
-        "reason": worker.CELL_LIMIT,
-    }
+    worker.run_dashboard_export(4, {}, 42)
+    tabs = m.create.call_args.args[1]
+    assert [tab.name for tab in tabs] == ["About", "7 - Sales"]
+    assert sum(map(tab_cells, tabs)) <= 62
+    assert [chart["chart_id"] for chart in m.context.payload["skipped_charts"]] == [
+        8,
+        9,
+    ]
+
+
+def test_budget_counts_extra_mapping_rows_before_converting(
+    m: _Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker, "MAX_CELLS", 60)
+    query = _chart().queries[0]
+    two_tabs = ChartResult(7, "Two tabs", [query, query], None)
+    survivor = _chart(8, "Fits", count=7)
+    m.results.side_effect = lambda *_: iter([two_tabs, survivor])
+    convert = MagicMock(wraps=worker.query_rows)
+    monkeypatch.setattr(worker, "query_rows", convert)
+
+    worker.run_dashboard_export(4, {}, 42)
+
+    convert.assert_called_once_with(survivor.queries[0])
+    tabs = m.create.call_args.args[1]
+    assert [tab.name for tab in tabs] == ["About", "8 - Fits"]
+    assert sum(map(tab_cells, tabs)) == 60
+    assert m.context.payload["skipped_charts"][0]["reason"] == worker.CELL_LIMIT
 
 
 def test_chart_query_failures_are_described_without_exposing_exceptions(
@@ -388,6 +412,22 @@ def test_writer_receives_abort_checkpoint_and_never_publishes_cancelled_link(
         worker.run_dashboard_export(4, {}, 42)
     assert "url" not in m.context.payload
     assert m.context.payload["error_message"] == worker.CANCELLED
+
+
+def test_late_abort_still_publishes_completed_spreadsheet(m: _Mocks) -> None:
+    url = m.create.return_value
+
+    def create(*args: object, checkpoint: Callable[[], None]) -> str:
+        checkpoint()
+        assert m.context.abort is not None
+        m.context.abort()
+        return url
+
+    m.create.side_effect = create
+    worker.run_dashboard_export(4, {}, 42)
+
+    assert m.context.payload["url"] == url
+    assert "error_message" not in m.context.payload
 
 
 def test_google_error_has_a_safe_task_failure_message(m: _Mocks) -> None:

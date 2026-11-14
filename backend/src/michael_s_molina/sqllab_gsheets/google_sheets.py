@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from google.auth.exceptions import RefreshError, TransportError
-from google.oauth2 import credentials as user_credentials, service_account
+from google.oauth2 import credentials as user_credentials
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from httplib2 import HttpLib2Error
@@ -20,6 +22,9 @@ from .cells import CellValue
 from .config import credentials_info, folder_id
 from .errors import ExportRejected
 from .google_http import GoogleHttp
+
+if TYPE_CHECKING:
+    from superset_core.exports.types import ChartQueryResult
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +65,24 @@ def tab_label(chart_id: int | None, chart_name: str, index: int) -> str:
     return f"{prefix} - {chart_name}"
 
 
+def _grid_dimensions(rows: list[list[CellValue]]) -> tuple[int, int]:
+    return max(1, len(rows)), max(1, max(map(len, rows), default=0))
+
+
+def tab_cells(tab: Tab) -> int:
+    """Count the rectangular grid allocated by Google Sheets, including headers."""
+    rows, columns = _grid_dimensions(tab.rows)
+    return rows * columns
+
+
+def query_cells(result: ChartQueryResult) -> int:
+    """Count a query's grid before converting its rows; the first row is its header."""
+    return (len(result.data) + 1) * max(1, len(result.colnames))
+
+
 def check_cell_limit(tabs: list[Tab]) -> None:
     """Refuse tabs that would exceed Google's cell limit, before any Google call."""
-    cells = sum(len(tab.rows) * len(tab.rows[0]) for tab in tabs if tab.rows)
+    cells = sum(map(tab_cells, tabs))
     if cells > MAX_CELLS:
         raise ExportRejected(
             400,
@@ -274,118 +294,135 @@ def _owner_email(drive: Any) -> str | None:
     return reply.get("user", {}).get("emailAddress")
 
 
-def create_spreadsheet(
-    title: str,
-    tabs: list[Tab],
-    share_with: str,
-    *,
-    checkpoint: Callable[[], None] | None = None,
-) -> str:
-    """Write and share a sheet, cleaning up failures and cancellation signals."""
-
-    def check() -> None:
-        if checkpoint is not None:
-            checkpoint()
-
-    file_id: str | None = None
-    drive: Any = None
-    http: GoogleHttp | None = None
-    try:
-        check()
-        info = credentials_info()
-        credentials = _credentials(info)
-        http = GoogleHttp(credentials)
-        drive = build("drive", "v3", http=http, cache_discovery=False)
-        sheets = build("sheets", "v4", http=http, cache_discovery=False)
-
-        file_id = _create_file(drive, title, folder_id())
-        check()
-
-        structure: list[dict[str, Any]] = []
-        for index, tab in enumerate(tabs):
-            properties = {
-                "title": tab.name,
-                "gridProperties": {
-                    "frozenRowCount": int(len(tab.rows) > 1),
-                    "rowCount": max(1, len(tab.rows)),
-                    "columnCount": max(1, max(map(len, tab.rows), default=0)),
-                },
-            }
-            if index == 0:
-                # Reuse the initial grid so it never consumes extra cell budget
-                # or collides with a requested tab named Sheet1.
-                structure.append(
-                    {
-                        "updateSheetProperties": {
-                            "properties": {"sheetId": DEFAULT_SHEET_ID, **properties},
-                            "fields": "title,gridProperties",
-                        }
+def _configure_tabs(sheets: Any, file_id: str, tabs: list[Tab]) -> list[int]:
+    structure: list[dict[str, Any]] = []
+    for index, tab in enumerate(tabs):
+        row_count, column_count = _grid_dimensions(tab.rows)
+        properties = {
+            "title": tab.name,
+            "gridProperties": {
+                "frozenRowCount": int(len(tab.rows) > 1),
+                "rowCount": row_count,
+                "columnCount": column_count,
+            },
+        }
+        if index == 0:
+            # Reuse the initial grid without consuming cells for an extra tab.
+            structure.append(
+                {
+                    "updateSheetProperties": {
+                        "properties": {"sheetId": DEFAULT_SHEET_ID, **properties},
+                        "fields": "title,gridProperties",
                     }
-                )
-            else:
-                structure.append({"addSheet": {"properties": properties}})
-        reply = _execute(
-            sheets.spreadsheets().batchUpdate(
-                spreadsheetId=file_id, body={"requests": structure}
+                }
             )
+        else:
+            structure.append({"addSheet": {"properties": properties}})
+    reply = _execute(
+        sheets.spreadsheets().batchUpdate(
+            spreadsheetId=file_id, body={"requests": structure}
         )
-        sheet_ids = [
-            DEFAULT_SHEET_ID,
-            *[
-                reply["replies"][i]["addSheet"]["properties"]["sheetId"]
-                for i in range(1, len(tabs))
-            ],
-        ]
-        check()
+    )
+    return [
+        DEFAULT_SHEET_ID,
+        *[
+            reply["replies"][i]["addSheet"]["properties"]["sheetId"]
+            for i in range(1, len(tabs))
+        ],
+    ]
 
-        for data in _value_batches(tabs):
-            check()
-            _execute(
-                sheets.spreadsheets()
-                .values()
-                .batchUpdate(
-                    spreadsheetId=file_id,
-                    body={"valueInputOption": "RAW", "data": data},
-                ),
-                retry_safe=True,
-            )
-            check()
 
-        _execute(
-            sheets.spreadsheets().batchUpdate(
-                spreadsheetId=file_id,
-                body={"requests": _format_requests(tabs, sheet_ids)},
-            ),
-            retry_safe=True,
-        )
-        check()
-
-        owner = _owner_email(drive) if info["type"] == "authorized_user" else None
-        check()
-        if not (owner and owner.casefold() == share_with.casefold()):
-            _execute(
-                drive.permissions().create(
-                    fileId=file_id,
-                    body={"type": "user", "role": "writer", "emailAddress": share_with},
-                    supportsAllDrives=True,
-                    sendNotificationEmail=True,
-                )
-            )
-        check()
-    except BaseException as ex:
+@contextmanager
+def _translate_google_error() -> Iterator[None]:
+    try:
+        yield
+    except Exception as ex:
         logger.exception("Google Sheets export failed")
         if isinstance(ex, RefreshError):
             logger.error(
                 "Google rejected the GSHEETS_CREDENTIALS token; for a personal account, "
                 "re-run scripts/gsheets_personal_setup.py"
             )
+        raise GoogleExportError() from ex
+
+
+def _noop() -> None:
+    """Default checkpoint for synchronous exports."""
+
+
+def create_spreadsheet(
+    title: str,
+    tabs: list[Tab],
+    share_with: str,
+    *,
+    checkpoint: Callable[[], None] = _noop,
+) -> str:
+    """Write and share a sheet, cleaning up failures and cancellation signals."""
+    file_id: str | None = None
+    drive: Any = None
+    http: GoogleHttp | None = None
+    try:
+        checkpoint()
+        with _translate_google_error():
+            info = credentials_info()
+            credentials = _credentials(info)
+            http = GoogleHttp(credentials)
+            drive = build("drive", "v3", http=http, cache_discovery=False)
+            sheets = build("sheets", "v4", http=http, cache_discovery=False)
+            file_id = _create_file(drive, title, folder_id())
+
+        checkpoint()
+        with _translate_google_error():
+            sheet_ids = _configure_tabs(sheets, file_id, tabs)
+            batches = _value_batches(tabs)
+        for data in batches:
+            checkpoint()
+            with _translate_google_error():
+                _execute(
+                    sheets.spreadsheets()
+                    .values()
+                    .batchUpdate(
+                        spreadsheetId=file_id,
+                        body={"valueInputOption": "RAW", "data": data},
+                    ),
+                    retry_safe=True,
+                )
+        with _translate_google_error():
+            _execute(
+                sheets.spreadsheets().batchUpdate(
+                    spreadsheetId=file_id,
+                    body={"requests": _format_requests(tabs, sheet_ids)},
+                ),
+                retry_safe=True,
+            )
+            owner = _owner_email(drive) if info["type"] == "authorized_user" else None
+
+        # Google may send a share email as part of this call. Once sharing
+        # succeeds, finish even if the task has received a cancellation.
+        checkpoint()
+        with _translate_google_error():
+            if not (owner and owner.casefold() == share_with.casefold()):
+                _execute(
+                    drive.permissions().create(
+                        fileId=file_id,
+                        body={
+                            "type": "user",
+                            "role": "writer",
+                            "emailAddress": share_with,
+                        },
+                        supportsAllDrives=True,
+                        sendNotificationEmail=True,
+                    )
+                )
+    except BaseException:
         if file_id is not None:
             _trash(drive, file_id)
-        if not isinstance(ex, Exception):
-            raise
-        raise GoogleExportError() from ex
+        raise
     finally:
         if http is not None:
-            http.close()
+            try:
+                http.close()
+            except Exception:
+                logger.warning("Couldn't close the Google API session", exc_info=True)
 
     return f"https://docs.google.com/spreadsheets/d/{file_id}/edit"

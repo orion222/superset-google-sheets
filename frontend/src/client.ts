@@ -69,6 +69,7 @@ async function parse<T>(response: Response): Promise<T> {
 }
 
 export async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const payload = JSON.stringify(body);
   const csrfToken = await authentication.getCSRFToken();
   const response = await fetch(withApplicationRoot(path), {
     method: 'POST',
@@ -76,12 +77,15 @@ export async function postJson<T>(path: string, body: unknown): Promise<T> {
       'Content-Type': 'application/json',
       'X-CSRFToken': csrfToken ?? '',
     },
-    body: JSON.stringify(body),
+    body: payload,
   });
   return parse<T>(response);
 }
 
-export async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(withApplicationRoot(path), { method: 'GET' });
+export async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(withApplicationRoot(path), {
+    method: 'GET',
+    ...(signal && { signal }),
+  });
   return parse<T>(response);
 }

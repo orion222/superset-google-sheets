@@ -28,7 +28,7 @@ from uuid import UUID
 import pytest
 from flask import Flask, g
 from michael_s_molina.sqllab_gsheets import dashboard_api as api_module
-from michael_s_molina.sqllab_gsheets import dashboard_task
+from michael_s_molina.sqllab_gsheets import dashboard_permissions, dashboard_task
 from michael_s_molina.sqllab_gsheets.errors import GENERIC_FAILURE, ExportRejected
 from michael_s_molina.sqllab_gsheets.filter_hash import dashboard_export_key
 from superset_core.tasks.types import TaskOptions
@@ -56,14 +56,17 @@ def dashboard_mocks(app: Flask, monkeypatch: pytest.MonkeyPatch) -> _Mocks:
     data_permission = MagicMock(return_value=True)
     dashboard_permission = MagicMock(return_value=True)
     sm = MagicMock()
+    sm.can_access.return_value = True
     sm.has_access.return_value = True
-    setattr(app, "appbuilder", SimpleNamespace(sm=sm))
+    monkeypatch.setattr(app, "appbuilder", SimpleNamespace(sm=sm), raising=False)
     app.config["FEATURE_FLAGS"] = {"GLOBAL_TASK_FRAMEWORK": True}
     queries = MagicMock()
     create = MagicMock()
     monkeypatch.setattr(api_module, "run_dashboard_export", worker)
-    monkeypatch.setattr(api_module, "can_export_data", data_permission)
-    monkeypatch.setattr(api_module, "can_export_dashboard", dashboard_permission)
+    monkeypatch.setattr(dashboard_permissions, "can_export_data", data_permission)
+    monkeypatch.setattr(
+        dashboard_permissions, "can_export_dashboard", dashboard_permission
+    )
     monkeypatch.setattr(dashboard_task, "iter_dashboard_chart_results", queries)
     monkeypatch.setattr(dashboard_task, "create_spreadsheet", create)
     return _Mocks(worker, data_permission, dashboard_permission, sm, queries, create)
@@ -193,16 +196,22 @@ def test_missing_permission_is_403_without_work(
     dashboard_mocks.create.assert_not_called()
 
 
-def test_disabled_tasks_are_503_before_data_access(
+def test_scheduler_reports_disabled_tasks_as_503(
     app: Flask, dashboard_mocks: _Mocks
 ) -> None:
-    """A disabled task framework rejects work before querying or allocating a file."""
+    """The framework owns the scheduling decision even if its setting changed."""
     app.config["FEATURE_FLAGS"] = {}
-    with pytest.raises(ExportRejected) as error:
-        api_module.start_dashboard_export({"dashboardId": 7}, 17, "u@x.com")
-    assert (error.value.status, error.value.message) == (503, api_module.TASKS_DISABLED)
-    dashboard_mocks.dashboard_permission.assert_not_called()
-    dashboard_mocks.worker.schedule.assert_not_called()
+    dashboard_mocks.worker.schedule.side_effect = type(
+        "GlobalTaskFrameworkDisabledError", (Exception,), {}
+    )()
+    endpoint = inspect.unwrap(api_module.DashboardExportAPI.export_to_sheets)
+    with app.test_request_context(method="POST", json={"dashboardId": 7}):
+        g.user = SimpleNamespace(id=17, email="u@x.com")
+        assert endpoint(_response_api()) == (
+            503,
+            {"message": api_module.TASKS_DISABLED},
+        )
+    dashboard_mocks.worker.schedule.assert_called_once()
     dashboard_mocks.queries.assert_not_called()
     dashboard_mocks.create.assert_not_called()
 
@@ -284,6 +293,17 @@ def test_capabilities_require_email_background_tasks_and_poll_access(
     dashboard_mocks.worker.schedule.assert_not_called()
 
 
+def test_capabilities_and_submission_reject_revoked_extension_grant(
+    dashboard_mocks: _Mocks,
+) -> None:
+    dashboard_mocks.security_manager.can_access.return_value = False
+    assert api_module.capabilities("u@x.com") == {"can_export": False}
+    with pytest.raises(ExportRejected) as error:
+        api_module.start_dashboard_export({"dashboardId": 7}, 17, "u@x.com")
+    assert error.value.status == 403
+    dashboard_mocks.worker.schedule.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("method_name", "path", "verb"),
     [
@@ -301,8 +321,8 @@ def test_routes_enforce_google_sheets_export_permission(
 ) -> None:
     """Keep the actual FAB protection wrapper on both exposed methods."""
     endpoint = getattr(api_module.DashboardExportAPI, method_name)
-    assert getattr(endpoint, "_permission_name") == "export"
-    assert (path, (verb,)) in getattr(endpoint, "_urls")
+    assert endpoint._permission_name == "export"
+    assert (path, (verb,)) in endpoint._urls
     instance = _response_api()
     instance.method_permission_name = {}
     instance.base_permissions = ["can_export"]

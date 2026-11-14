@@ -26,6 +26,8 @@ from superset_core.exports.types import DashboardExportInfo
 from .cells import CellValue
 from .google_sheets import Tab
 
+ABOUT_COLUMNS = 4
+
 
 @dataclass(frozen=True)
 class ExportedTab:

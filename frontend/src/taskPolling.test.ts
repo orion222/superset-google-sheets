@@ -58,7 +58,10 @@ test('polls core task details every five seconds until success and removes timer
     });
   const watching = pollTask(TASK_ID);
   await jest.advanceTimersByTimeAsync(0);
-  expect(get).toHaveBeenCalledWith(`/api/v1/task/${TASK_ID}`);
+  expect(get).toHaveBeenCalledWith(
+    `/api/v1/task/${TASK_ID}`,
+    expect.any(AbortSignal),
+  );
   await jest.advanceTimersByTimeAsync(4_999);
   expect(get).toHaveBeenCalledTimes(1);
   await jest.advanceTimersByTimeAsync(5_001);
@@ -140,14 +143,17 @@ test.each(['failure', 'aborted', 'timed_out'] as const)(
   },
 );
 
-test('rejects malformed task responses without polling indefinitely', async () => {
-  get.mockResolvedValue({ result: { status: 'unknown' } });
-  const watching = pollTask(TASK_ID);
-  const rejected = expect(watching).rejects.toThrow('Invalid task response');
-  await jest.advanceTimersByTimeAsync(0);
-  await rejected;
-  expect(jest.getTimerCount()).toBe(0);
-});
+test.each(['unknown', 'constructor'])(
+  'rejects unrecognized status %s without polling indefinitely',
+  async status => {
+    get.mockResolvedValue({ result: { status } });
+    const watching = pollTask(TASK_ID);
+    const rejected = expect(watching).rejects.toThrow('Invalid task response');
+    await jest.advanceTimersByTimeAsync(0);
+    await rejected;
+    expect(jest.getTimerCount()).toBe(0);
+  },
+);
 
 test('cancellation removes the hidden-page listener and stops future polling', async () => {
   setHidden(true);
@@ -166,12 +172,15 @@ test('cancellation removes the hidden-page listener and stops future polling', a
   remove.mockRestore();
 });
 
-test('cancels an unresolved request without waiting for the HTTP response', async () => {
-  let resolve!: (value: unknown) => void;
+test('cancels an in-flight request before receiving an HTTP response', async () => {
+  const aborted = jest.fn();
   get.mockImplementationOnce(
-    () =>
-      new Promise(done => {
-        resolve = done;
+    (_path, signal) =>
+      new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => {
+          aborted();
+          reject(new DOMException('Request aborted', 'AbortError'));
+        });
       }),
   );
   const controller = new AbortController();
@@ -179,10 +188,11 @@ test('cancels an unresolved request without waiting for the HTTP response', asyn
   const rejected =
     expect(watching).rejects.toBeInstanceOf(TaskPollingCancelled);
   await jest.advanceTimersByTimeAsync(0);
+  expect(get).toHaveBeenCalledTimes(1);
   controller.abort();
   await rejected;
+  expect(aborted).toHaveBeenCalledTimes(1);
   expect(jest.getTimerCount()).toBe(0);
-  resolve(result('success'));
   await jest.advanceTimersByTimeAsync(60_000);
   expect(get).toHaveBeenCalledTimes(1);
 });

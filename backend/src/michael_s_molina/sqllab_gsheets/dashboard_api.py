@@ -24,14 +24,14 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from flask import Response, current_app, g, request
 from flask_appbuilder.api import expose, permission_name, protect
-from superset_core.exports.export import can_export_dashboard, can_export_data
 from superset_core.rest_api.api import RestApi
 from superset_core.rest_api.decorators import api
 from superset_core.tasks.types import TaskOptions
 
 from .config import background_tasks_enabled, export_timeout_seconds
+from .dashboard_permissions import dashboard_export_allowed
 from .dashboard_task import run_dashboard_export
-from .errors import GENERIC_FAILURE, INVALID_REQUEST, ExportRejected
+from .errors import GENERIC_FAILURE, INVALID_REQUEST, ExportRejected, is_named_exception
 from .filter_hash import dashboard_export_key, snapshot_filters
 
 if TYPE_CHECKING:
@@ -59,12 +59,17 @@ class _DashboardScheduler(Protocol):
         ...
 
 
+def can_read_tasks() -> bool:
+    """Check task visibility at the two browser entry points."""
+    return cast(Any, current_app).appbuilder.sm.has_access("can_read", "Task")
+
+
 def capabilities(email: str | None) -> dict[str, bool]:
     """Hide the command when it cannot start or observe background exports."""
     return {
-        "can_export": bool(email)
-        and background_tasks_enabled()
-        and cast(Any, current_app).appbuilder.sm.has_access("can_read", "Task")
+        "can_export": background_tasks_enabled()
+        and can_read_tasks()
+        and dashboard_export_allowed(email)
     }
 
 
@@ -72,12 +77,8 @@ def start_dashboard_export(
     body: Any, user_id: int | None, email: str | None
 ) -> dict[str, Any]:
     """Snapshot filters and atomically create or join the requester's export."""
-    if not user_id or not email or not can_export_data():
+    if not user_id or not can_read_tasks():
         raise ExportRejected(403, PERMISSION_DENIED)
-    if not cast(Any, current_app).appbuilder.sm.has_access("can_read", "Task"):
-        raise ExportRejected(403, PERMISSION_DENIED)
-    if not background_tasks_enabled():
-        raise ExportRejected(503, TASKS_DISABLED)
     if not isinstance(body, dict):
         raise ExportRejected(400, INVALID_REQUEST)
     dashboard_id = body.get("dashboardId")
@@ -88,13 +89,7 @@ def start_dashboard_export(
     ):
         raise ExportRejected(400, INVALID_REQUEST)
     active_data_mask = snapshot_filters(body.get("activeDataMask", {}))
-    try:
-        permitted = can_export_dashboard(dashboard_id)
-    except Exception as ex:
-        if type(ex).__name__ == "SupersetSecurityException":
-            raise ExportRejected(403, PERMISSION_DENIED) from ex
-        raise
-    if not permitted:
+    if not dashboard_export_allowed(email, dashboard_id):
         raise ExportRejected(403, PERMISSION_DENIED)
     task = cast(_DashboardScheduler, run_dashboard_export).schedule(
         dashboard_id,
@@ -106,6 +101,7 @@ def start_dashboard_export(
             timeout=export_timeout_seconds(),
         ),
     )
+    # Superset's scheduler increments dedupe_count when joining a running task.
     return {
         "task_id": str(task.uuid),
         "already_running": task.properties_dict.get("dedupe_count", 0) > 0,
@@ -130,7 +126,7 @@ class DashboardExportAPI(RestApi):
         except ExportRejected as ex:
             return self.response(ex.status, message=ex.message)
         except Exception as ex:
-            if type(ex).__name__ == "GlobalTaskFrameworkDisabledError":
+            if is_named_exception(ex, "GlobalTaskFrameworkDisabledError"):
                 return self.response(503, message=TASKS_DISABLED)
             logger.exception("Couldn't schedule Google Sheets dashboard export")
             return self.response(500, message=GENERIC_FAILURE)

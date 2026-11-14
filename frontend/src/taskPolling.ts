@@ -19,15 +19,8 @@
 import { ApiError, getJson } from './client';
 
 export interface TaskResult {
-  status:
-    | 'pending'
-    | 'in_progress'
-    | 'aborting'
-    | 'success'
-    | 'failure'
-    | 'aborted'
-    | 'timed_out';
-  payload?: { url?: unknown } | null;
+  status: keyof typeof TASK_STATUSES;
+  payload?: { url?: unknown; error_message?: unknown } | null;
 }
 
 export interface TaskPollingOptions {
@@ -37,15 +30,15 @@ export interface TaskPollingOptions {
 
 const POLL_INTERVAL_MS = 5_000;
 const MAX_WAIT_MS = 30 * 60 * 1_000;
-const TASK_STATUSES: TaskResult['status'][] = [
-  'pending',
-  'in_progress',
-  'aborting',
-  'success',
-  'failure',
-  'aborted',
-  'timed_out',
-];
+const TASK_STATUSES = {
+  pending: 'active',
+  in_progress: 'active',
+  aborting: 'active',
+  success: 'terminal',
+  failure: 'terminal',
+  aborted: 'terminal',
+  timed_out: 'terminal',
+} as const;
 
 /** Distinguishes cancellation from failures that need an error toast. */
 export class TaskPollingCancelled extends Error {
@@ -89,24 +82,7 @@ function waitForPoll(delayMs: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** Stops waiting for an in-flight response when its watcher is cancelled. */
-function withCancellation<T>(
-  request: Promise<T>,
-  signal: AbortSignal,
-): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const cancel = () => reject(new TaskPollingCancelled());
-    signal.addEventListener('abort', cancel, { once: true });
-    request
-      .then(resolve, reject)
-      .finally(() => signal.removeEventListener('abort', cancel));
-    if (signal.aborted) {
-      cancel();
-    }
-  });
-}
-
-/** Polls the core task detail API without overlapping requests or exposing task errors. */
+/** Polls the core task detail API without overlapping requests. */
 export async function pollTask(
   taskId: string,
   options: TaskPollingOptions = {},
@@ -130,10 +106,8 @@ export async function pollTask(
       await waitForPoll(delay, controller.signal);
       let response: { result?: TaskResult };
       try {
-        response = await withCancellation(
-          getJson<{ result?: TaskResult }>(
-            `/api/v1/task/${encodeURIComponent(taskId)}`,
-          ),
+        response = await getJson<{ result?: TaskResult }>(
+          `/api/v1/task/${encodeURIComponent(taskId)}`,
           controller.signal,
         );
       } catch (error) {
@@ -157,10 +131,13 @@ export async function pollTask(
         throw new TaskPollingCancelled();
       }
       const result = response?.result;
-      if (!result || !TASK_STATUSES.includes(result.status)) {
+      if (
+        typeof result?.status !== 'string' ||
+        !Object.prototype.hasOwnProperty.call(TASK_STATUSES, result.status)
+      ) {
         throw new Error('Invalid task response');
       }
-      if (!['pending', 'in_progress', 'aborting'].includes(result.status)) {
+      if (TASK_STATUSES[result.status] === 'terminal') {
         return result;
       }
       failures = 0;

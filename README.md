@@ -69,7 +69,7 @@ Users need the extension and data export permissions below, dashboard export per
 
 The dashboard budget includes chart header rows and the About tab within the extension's 10,000,000-cell budget. Charts that fail or would exceed the remaining budget are skipped as a whole and recorded in About. If every chart is skipped, the task fails without creating a spreadsheet. The synchronous row cap applies to individual chart and SQL Lab exports; dashboard exports use the shared cell budget and worker timeout.
 
-Use Superset's task list to cancel an export. Cancellation and timeout are cooperative: the worker checks between charts and Google write phases, then trashes a known incomplete spreadsheet. Google errors also trigger cleanup, and sharing occurs only after all tabs are written. Cancellation arriving after writing completes can leave a completed spreadsheet URL in a cancelled task; inspect its result before retrying. A hard-stopped worker or an unresolved file-creation response can leave a partial file for operational cleanup. Reopening the page does not automatically resume completion toasts; the task list retains the result.
+Use Superset's task list to cancel an export. Cancellation and timeout are cooperative. The worker checks between charts and Google write phases and trashes a known incomplete spreadsheet if cancelled before sharing. Once sharing starts, a cancellation leaves the completed spreadsheet available. Check the task result before retrying. Google write failures also trigger cleanup. A hard-stopped worker or an unresolved file-creation response can leave a partial file for operational cleanup. The task list retains the result if you leave the dashboard.
 
 ## Installation
 
@@ -162,6 +162,11 @@ Exports are owned by one personal Google account. No Shared Drive is needed.
    ```
 
 The output contains a refresh token. Treat it as a secret and do not commit it.
+
+To save these same two settings in JSON without printing the refresh token, add
+`--config-output path/to/google-export.json` to the setup command. Choose a new
+file in an existing directory that only you can access, outside your Git checkout.
+Load the two settings from that file in your Superset configuration.
 
 Caveats:
 

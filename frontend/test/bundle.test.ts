@@ -318,6 +318,7 @@ test('production dashboard polling cancels on pagehide without an error toast', 
     await jest.advanceTimersByTimeAsync(0);
     expect(extension.fetchMock).toHaveBeenCalledWith(`/api/v1/task/${taskId}`, {
       method: 'GET',
+      signal: expect.any(AbortSignal),
     });
     extension.leavePage();
     await exporting;

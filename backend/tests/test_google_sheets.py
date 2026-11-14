@@ -5,15 +5,14 @@ from unittest.mock import ANY
 
 import pytest
 from flask import Flask
-
 from michael_s_molina.sqllab_gsheets.cells import CellValue
 from michael_s_molina.sqllab_gsheets.errors import ExportRejected
 from michael_s_molina.sqllab_gsheets.google_sheets import (
+    GoogleExportError,
+    Tab,
     check_cell_limit,
     create_spreadsheet,
-    GoogleExportError,
     tab_label,
-    Tab,
 )
 
 
@@ -113,47 +112,54 @@ def test_header_only_temporal_tabs_keep_format_ranges_within_grid(
         assert area.get("startColumnIndex", 0) < grid["columnCount"]
 
 
-@pytest.mark.parametrize("phase", ["create", "structure", "values", "format", "share"])
-def test_cancel_during_google_write_trashes_the_partial_file(app, google, phase):
-    """A cancellation noticed after any phase prevents a successful return."""
+@pytest.mark.parametrize("phase", ["create", "structure", "values", "format"])
+def test_cancel_before_sharing_trashes_the_partial_file(app, google, phase, caplog):
     operations = {
         "create": ["files.create"],
         "structure": ["files.create", "batchUpdate"],
         "values": ["files.create", "batchUpdate", "values.batchUpdate"],
         "format": ["files.create", "batchUpdate", "values.batchUpdate", "batchUpdate"],
-        "share": [
-            "files.create",
-            "batchUpdate",
-            "values.batchUpdate",
-            "batchUpdate",
-            "permissions.create",
-        ],
     }
 
     def checkpoint():
-        if [c[0] for c in google.call_order] == operations[phase]:
+        completed = [c[0] for c in google.call_order]
+        if completed[: len(operations[phase])] == operations[phase]:
             raise RuntimeError("cancel requested")
 
-    with pytest.raises(GoogleExportError):
+    with pytest.raises(RuntimeError, match="cancel requested"):
         create_spreadsheet(
             "t", [Tab("a", [["h"], [1]], [])], "u@x.com", checkpoint=checkpoint
         )
     google.drive.files().update.assert_called_once_with(
         fileId="file-1", body={"trashed": True}, supportsAllDrives=True
     )
-    if phase != "share":
-        google.drive.permissions().create.assert_not_called()
+    google.drive.permissions().create.assert_not_called()
+    assert "Google Sheets export failed" not in caplog.text
 
 
 def test_cancel_before_creation_does_not_create_a_file(app, google):
     def checkpoint():
         raise RuntimeError("cancel requested")
 
-    with pytest.raises(GoogleExportError):
+    with pytest.raises(RuntimeError, match="cancel requested"):
         create_spreadsheet(
             "t", [Tab("a", [["h"]], [])], "u@x.com", checkpoint=checkpoint
         )
     google.drive.files().create.assert_not_called()
+
+
+def test_completed_share_is_not_undone_on_late_cancel(app, google):
+    def checkpoint():
+        if any(c[0] == "permissions.create" for c in google.call_order):
+            raise RuntimeError("cancel requested")
+
+    url = create_spreadsheet(
+        "t", [Tab("a", [["h"]], [])], "u@x.com", checkpoint=checkpoint
+    )
+
+    assert url == "https://docs.google.com/spreadsheets/d/file-1/edit"
+    google.drive.permissions().create.assert_called_once()
+    google.drive.files().update.assert_not_called()
 
 
 def test_base_exception_during_write_cleans_up_and_propagates(app, google):
@@ -300,7 +306,30 @@ def test_cell_limit_counts_header_rows_across_tabs():
     )
 
 
-def test_cell_limit_ignores_empty_tabs():
+def test_cell_limit_counts_the_same_grid_the_writer_allocates(app, google, monkeypatch):
+    import michael_s_molina.sqllab_gsheets.google_sheets as sheets
+
+    tabs = [Tab("Ragged", [["h"], [1, 2, 3]], []), Tab("Empty", [], [])]
+    monkeypatch.setattr(sheets, "MAX_CELLS", 6)
+    with pytest.raises(ExportRejected, match="7 cells, limit 6"):
+        check_cell_limit(tabs)
+
+    monkeypatch.setattr(sheets, "MAX_CELLS", 7)
+    check_cell_limit(tabs)
+    create_spreadsheet("t", tabs, "u@x.com")
+    requests = (
+        google.sheets.spreadsheets()
+        .batchUpdate.call_args_list[0]
+        .kwargs["body"]["requests"]
+    )
+    grids = [
+        next(iter(request.values()))["properties"]["gridProperties"]
+        for request in requests
+    ]
+    assert [(g["rowCount"], g["columnCount"]) for g in grids] == [(2, 3), (1, 1)]
+
+
+def test_cell_limit_accepts_empty_tabs():
     check_cell_limit([Tab("a", [], [])])
 
 
