@@ -1,13 +1,30 @@
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from enum import Enum
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
-from superset_core.exports.types import ChartQueryResult, GenericDataType
+
+
+class GenericDataType(Enum):
+    STRING = "string"
+    NUMERIC = "numeric"
+    BOOLEAN = "boolean"
+    TEMPORAL = "temporal"
+
+
+@dataclass
+class ChartQueryResult:
+    colnames: list[str]
+    coltypes: list[GenericDataType]
+    data: list[dict[str, Any]]
 
 from michael_s_molina.sqllab_gsheets.cells import (
     dataframe_rows,
+    query_result_data,
     query_rows,
     temporal_columns,
     to_cell,
@@ -92,6 +109,7 @@ def test_query_rows_header_then_values_in_column_order():
         [{"a": "x", "b": 1}],
     )
     assert query_rows(result) == [["b", "a"], [1, "x"]]
+    assert query_result_data(result) == ([["b", "a"], [1, "x"]], [])
 
 
 def test_query_rows_nullable_epoch_milliseconds_stay_dates() -> None:
@@ -108,6 +126,10 @@ def test_query_rows_nullable_epoch_milliseconds_stay_dates() -> None:
 
     assert query_rows(result) == [["d", "n"], [46023.5, 1.5], ["", 2.5]]
     assert temporal_columns(result) == [0]
+    assert query_result_data(result) == (
+        [["d", "n"], [46023.5, 1.5], ["", 2.5]],
+        [0],
+    )
 
 
 def test_temporal_columns():

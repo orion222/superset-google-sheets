@@ -317,7 +317,7 @@ def test_sql_export_at_row_limit_is_exported(app, m):
 
 def test_sql_export_over_cell_limit_is_400_before_any_google_call(app, m):
     m.execute.return_value = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
-    with patch("michael_s_molina.sqllab_gsheets.google_sheets.MAX_CELLS", 5):
+    with patch("michael_s_molina.sqllab_gsheets.tabs.MAX_CELLS", 5):
         with pytest.raises(ExportRejected) as e:
             _export()
     assert e.value.status == 400

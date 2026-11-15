@@ -14,6 +14,10 @@ def is_security_exception(error: BaseException) -> bool:
     )
 
 
+class GoogleSheetsConfigError(Exception):
+    """Raised when a required GSHEETS_* setting is missing or invalid."""
+
+
 class ExportRejected(Exception):
     """An export refused with an HTTP status and a message safe to show the user."""
 

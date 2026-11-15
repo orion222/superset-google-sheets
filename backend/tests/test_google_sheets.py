@@ -6,13 +6,13 @@ import pytest
 
 from michael_s_molina.sqllab_gsheets.cells import CellValue
 from michael_s_molina.sqllab_gsheets.errors import ExportRejected
+from michael_s_molina.sqllab_gsheets.chart import tab_label
+from michael_s_molina.sqllab_gsheets.tabs import check_cell_limit, Tab
 from michael_s_molina.sqllab_gsheets.google_sheets import (
-    check_cell_limit,
     create_spreadsheet,
     GoogleExportError,
-    tab_label,
-    Tab,
 )
+from michael_s_molina.sqllab_gsheets import google_sheets as writer
 
 
 def test_creates_in_shared_drive_writes_formats_then_shares_last(app, google):
@@ -33,7 +33,6 @@ def test_creates_in_shared_drive_writes_formats_then_shares_last(app, google):
         "files.create",
         "batchUpdate",
         "values.batchUpdate",
-        "batchUpdate",
         "permissions.create",
     ]
     google.drive.permissions().create.assert_called_with(
@@ -53,22 +52,32 @@ def test_first_batch_adds_frozen_tabs_then_deletes_default_sheet(app, google):
         .kwargs["body"]["requests"]
     )
     assert requests[0]["addSheet"]["properties"] == {
+        "sheetId": 1,
         "title": "a",
         "gridProperties": {"frozenRowCount": 1},
     }
-    assert requests[1]["addSheet"]["properties"]["title"] == "b"
-    assert requests[2] == {"deleteSheet": {"sheetId": 0}}
+    assert requests[1]["addSheet"]["properties"] == {
+        "sheetId": 2,
+        "title": "b",
+        "gridProperties": {"frozenRowCount": 1},
+    }
+    assert requests[-1] == {"deleteSheet": {"sheetId": 0}}
+    assert [
+        request["repeatCell"]["range"]["sheetId"]
+        for request in requests
+        if "repeatCell" in request
+    ] == [1, 2]
 
 
-def test_headers_are_bolded_using_returned_sheet_ids(app, google):
+def test_headers_are_bolded_using_explicit_sheet_ids(app, google):
     create_spreadsheet("t", [Tab("a", [["h"]], []), Tab("b", [["h"]], [])], "u@x.com")
     requests = (
         google.sheets.spreadsheets()
-        .batchUpdate.call_args_list[1]
+        .batchUpdate.call_args_list[0]
         .kwargs["body"]["requests"]
     )
     bold = [r["repeatCell"] for r in requests if "textFormat" in str(r)]
-    assert [r["range"]["sheetId"] for r in bold] == [100, 101]
+    assert [r["range"]["sheetId"] for r in bold] == [1, 2]
     assert bold[0]["range"]["startRowIndex"] == 0
     assert bold[0]["range"]["endRowIndex"] == 1
     assert bold[0]["cell"]["userEnteredFormat"] == {"textFormat": {"bold": True}}
@@ -79,7 +88,7 @@ def test_write_calls_do_not_grow_with_tab_count(app, google):
         "t", [Tab(f"{i} - c", [["a"], [i]], []) for i in range(40)], "u@x.com"
     )
     assert google.sheets.spreadsheets().values().batchUpdate.call_count == 1
-    assert google.sheets.spreadsheets().batchUpdate.call_count == 2
+    assert google.sheets.spreadsheets().batchUpdate.call_count == 1
 
 
 def test_large_payload_splits_value_writes(app, google):
@@ -152,7 +161,7 @@ def test_date_columns_formatted(app, google):
     create_spreadsheet("t", [Tab("1 - c", [["d"], [46023.0]], [0])], "u@x.com")
     fmt = (
         google.sheets.spreadsheets()
-        .batchUpdate.call_args_list[1]
+        .batchUpdate.call_args_list[0]
         .kwargs["body"]["requests"]
     )
     assert {
@@ -160,6 +169,23 @@ def test_date_columns_formatted(app, google):
     } in [
         r["repeatCell"]["cell"]["userEnteredFormat"] for r in fmt if "repeatCell" in r
     ]
+
+
+def test_export_uses_configured_http_timeout(app, google, monkeypatch):
+    app.config["GSHEETS_EXPORT_TIMEOUT_SECONDS"] = 17
+    timeouts = []
+
+    class TrackedHttp:
+        def __init__(self, _credentials, timeout=60):
+            timeouts.append(timeout)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(writer, "GoogleHttp", TrackedHttp)
+    create_spreadsheet("t", [Tab("a", [["h"]], [])], "u@x.com")
+
+    assert timeouts == [17]
 
 
 @pytest.mark.parametrize(
@@ -190,3 +216,10 @@ def test_cell_limit_counts_header_rows_across_tabs():
 
 def test_cell_limit_ignores_empty_tabs():
     check_cell_limit([Tab("a", [], [])])
+
+
+def test_google_sheets_keeps_helper_imports_for_stacked_callers():
+    assert writer.Tab is Tab
+    assert writer.check_cell_limit is check_cell_limit
+    assert writer.tab_label is tab_label
+    assert writer.MAX_CELLS == 10_000_000
