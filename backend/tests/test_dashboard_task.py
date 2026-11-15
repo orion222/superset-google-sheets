@@ -18,12 +18,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
+from uuid import UUID
 
 import pytest
 from flask import Flask, g, has_request_context
@@ -40,6 +42,8 @@ from superset_core.exports.types import (
     SkipReason,
 )
 from superset_core.tasks.types import TaskScope
+
+DASHBOARD_UUID = UUID("c1dcf074-51a9-445c-a9e4-a16c3c437278")
 
 
 class _Context:
@@ -59,6 +63,8 @@ class _Context:
         *,
         immediate: bool = False,
     ) -> None:
+        # Model the JSON boundary rather than accepting arbitrary Python objects.
+        json.dumps(payload)
         self.payload.update(payload or {})
         if self.after_update is not None:
             self.after_update()
@@ -78,7 +84,7 @@ class _Mocks:
 
 def _chart(chart_id: int = 7, name: str = "Sales", count: int = 1) -> ChartResult:
     return ChartResult(
-        chart_id,
+        UUID(int=chart_id),
         name,
         [
             ChartQueryResult(
@@ -103,7 +109,7 @@ def m(app: Flask, monkeypatch: pytest.MonkeyPatch) -> _Mocks:
             "Revenue",
             "https://superset.test/dashboard/permalink/snapshot/",
             [AppliedFilter("Region", "EU")],
-            {7: "/explore/?slice_id=7", 8: "/explore/?slice_id=8"},
+            {UUID(int=7): "/explore/?slice_id=7", UUID(int=8): "/explore/?slice_id=8"},
         )
     )
     permission = MagicMock(return_value=True)
@@ -163,20 +169,26 @@ def test_worker_is_private_and_runs_as_requester_with_live_filter_state(
     mask = {
         "filter": {"extraFormData": {"filters": [{"col": "region", "val": ["EU"]}]}}
     }
-    worker.run_dashboard_export(4, mask, 42)
+    worker.run_dashboard_export(str(DASHBOARD_UUID), mask, 42)
 
     assert getattr(worker.run_dashboard_export, "scope") is TaskScope.PRIVATE
     assert m.user_ids == [42]
     assert g.user.id == 99
     m.permission.assert_called_with("can_export", "GoogleSheets")
-    m.metadata.assert_called_once_with(4, mask)
-    m.results.assert_called_once_with(4, mask)
+    m.metadata.assert_called_once_with(DASHBOARD_UUID, mask)
+    m.results.assert_called_once_with(DASHBOARD_UUID, mask)
+    assert m.dashboard_permission.call_args_list == [
+        call(DASHBOARD_UUID),
+        call(DASHBOARD_UUID),
+    ]
     args = m.create.call_args
     assert args.args[0].startswith("Revenue · ")
     tabs: list[Tab] = args.args[1]
-    assert [tab.name for tab in tabs] == ["About", "7 - Sales"]
+    assert [tab.name for tab in tabs] == ["About", f"{UUID(int=7)} - Sales"]
     assert ["Region", "EU", "", ""] in tabs[0].rows
-    assert ["7 - Sales", "Sales", "/explore/?slice_id=7", 1] in tabs[0].rows
+    assert [f"{UUID(int=7)} - Sales", "Sales", "/explore/?slice_id=7", 1] in tabs[
+        0
+    ].rows
     assert args.args[2] == "requester@x.com"
     assert callable(args.kwargs["checkpoint"])
     assert m.context.payload == {
@@ -196,7 +208,7 @@ def test_worker_checks_permissions_without_an_http_request(
     monkeypatch.setattr(app, "appbuilder", SimpleNamespace(sm=sm))
     assert not has_request_context()
 
-    worker.run_dashboard_export(4, {}, 42)
+    worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
 
     m.permission.assert_called_with("can_export", "GoogleSheets")
     assert m.context.payload["url"] == m.create.return_value
@@ -211,7 +223,7 @@ def test_revoked_permission_stops_before_metadata_or_google(
 ) -> None:
     getattr(m, permission).return_value = False
     with pytest.raises(worker.DashboardExportError, match=worker.ACCESS_DENIED):
-        worker.run_dashboard_export(4, {}, 42)
+        worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
     m.metadata.assert_not_called()
     m.results.assert_not_called()
     m.create.assert_not_called()
@@ -221,8 +233,12 @@ def test_revoked_permission_stops_before_metadata_or_google(
 def test_permissions_are_checked_again_after_querying(m: _Mocks) -> None:
     m.dashboard_permission.side_effect = [True, False]
     with pytest.raises(worker.DashboardExportError, match=worker.ACCESS_DENIED):
-        worker.run_dashboard_export(4, {}, 42)
+        worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
     m.results.assert_called_once()
+    assert m.dashboard_permission.call_args_list == [
+        call(DASHBOARD_UUID),
+        call(DASHBOARD_UUID),
+    ]
     m.create.assert_not_called()
 
 
@@ -233,7 +249,7 @@ def test_latest_requester_email_is_used_after_querying(m: _Mocks) -> None:
         yield _chart()
 
     m.results.side_effect = results
-    worker.run_dashboard_export(4, {}, 42)
+    worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
     assert m.create.call_args.args[2] == "updated@x.com"
 
 
@@ -241,7 +257,7 @@ def test_worker_skips_whole_chart_when_one_of_its_queries_cannot_convert(
     m: _Mocks,
 ) -> None:
     bad = ChartResult(
-        8,
+        UUID(int=8),
         "Bad date",
         [
             _chart().queries[0],
@@ -250,12 +266,15 @@ def test_worker_skips_whole_chart_when_one_of_its_queries_cannot_convert(
         None,
     )
     m.results.side_effect = lambda *_: iter([bad, _chart()])
-    worker.run_dashboard_export(4, {}, 42)
+    worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
 
-    assert [tab.name for tab in m.create.call_args.args[1]] == ["About", "7 - Sales"]
+    assert [tab.name for tab in m.create.call_args.args[1]] == [
+        "About",
+        f"{UUID(int=7)} - Sales",
+    ]
     assert m.context.payload["skipped_charts"] == [
         {
-            "chart_id": 8,
+            "chart_id": str(UUID(int=8)),
             "chart_name": "Bad date",
             "reason": worker.CHART_FAILED,
         }
@@ -267,24 +286,27 @@ def test_cell_budget_includes_about_and_skips_oversized_chart(
 ) -> None:
     monkeypatch.setattr(worker, "MAX_CELLS", 100)
     m.results.side_effect = lambda *_: iter([_chart(), _chart(8, "Large", count=100)])
-    worker.run_dashboard_export(4, {}, 42)
+    worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
 
     tabs = m.create.call_args.args[1]
-    assert [tab.name for tab in tabs] == ["About", "7 - Sales"]
+    assert [tab.name for tab in tabs] == ["About", f"{UUID(int=7)} - Sales"]
     assert sum(map(tab_cells, tabs)) <= 100
     assert m.context.payload["skipped_charts"] == [
         {
-            "chart_id": 8,
+            "chart_id": str(UUID(int=8)),
             "chart_name": "Large",
             "reason": worker.CELL_LIMIT,
         }
     ]
 
 
-def test_about_tab_name_is_reserved(m: _Mocks) -> None:
+def test_chart_named_about_has_a_distinct_uuid_tab(m: _Mocks) -> None:
     m.results.side_effect = lambda *_: iter([_chart(0, "About")])
-    worker.run_dashboard_export(4, {}, 42)
-    assert [tab.name for tab in m.create.call_args.args[1]] == ["About", "About~2"]
+    worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
+    assert [tab.name for tab in m.create.call_args.args[1]] == [
+        "About",
+        f"{UUID(int=0)} - About",
+    ]
 
 
 def test_metadata_alone_over_limit_fails_before_querying(
@@ -292,7 +314,7 @@ def test_metadata_alone_over_limit_fails_before_querying(
 ) -> None:
     monkeypatch.setattr(worker, "MAX_CELLS", 1)
     with pytest.raises(worker.DashboardExportError, match="metadata exceeds"):
-        worker.run_dashboard_export(4, {}, 42)
+        worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
     m.results.assert_not_called()
     m.create.assert_not_called()
 
@@ -300,22 +322,22 @@ def test_metadata_alone_over_limit_fails_before_querying(
 def test_later_skip_rows_cannot_overflow_final_about_budget(
     m: _Mocks, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    m.metadata.return_value.chart_urls[9] = "/explore/?slice_id=9"
+    m.metadata.return_value.chart_urls[UUID(int=9)] = "/explore/?slice_id=9"
     monkeypatch.setattr(worker, "MAX_CELLS", 62)
     m.results.side_effect = lambda *_: iter(
         [
             _chart(),
-            ChartResult(8, "Broken", [], SkipReason.GENERAL),
-            ChartResult(9, "Broken too", [], SkipReason.GENERAL),
+            ChartResult(UUID(int=8), "Broken", [], SkipReason.GENERAL),
+            ChartResult(UUID(int=9), "Broken too", [], SkipReason.GENERAL),
         ]
     )
-    worker.run_dashboard_export(4, {}, 42)
+    worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
     tabs = m.create.call_args.args[1]
-    assert [tab.name for tab in tabs] == ["About", "7 - Sales"]
+    assert [tab.name for tab in tabs] == ["About", f"{UUID(int=7)} - Sales"]
     assert sum(map(tab_cells, tabs)) <= 62
     assert [chart["chart_id"] for chart in m.context.payload["skipped_charts"]] == [
-        8,
-        9,
+        str(UUID(int=8)),
+        str(UUID(int=9)),
     ]
 
 
@@ -324,17 +346,17 @@ def test_budget_counts_extra_mapping_rows_before_converting(
 ) -> None:
     monkeypatch.setattr(worker, "MAX_CELLS", 60)
     query = _chart().queries[0]
-    two_tabs = ChartResult(7, "Two tabs", [query, query], None)
+    two_tabs = ChartResult(UUID(int=7), "Two tabs", [query, query], None)
     survivor = _chart(8, "Fits", count=7)
     m.results.side_effect = lambda *_: iter([two_tabs, survivor])
     convert = MagicMock(wraps=worker.query_rows)
     monkeypatch.setattr(worker, "query_rows", convert)
 
-    worker.run_dashboard_export(4, {}, 42)
+    worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
 
     convert.assert_called_once_with(survivor.queries[0])
     tabs = m.create.call_args.args[1]
-    assert [tab.name for tab in tabs] == ["About", "8 - Fits"]
+    assert [tab.name for tab in tabs] == ["About", f"{UUID(int=8)} - Fits"]
     assert sum(map(tab_cells, tabs)) == 60
     assert m.context.payload["skipped_charts"][0]["reason"] == worker.CELL_LIMIT
 
@@ -344,14 +366,14 @@ def test_chart_query_failures_are_described_without_exposing_exceptions(
 ) -> None:
     m.results.side_effect = lambda *_: iter(
         [
-            ChartResult(8, "Broken", [], SkipReason.GENERAL),
+            ChartResult(UUID(int=8), "Broken", [], SkipReason.GENERAL),
             _chart(),
         ]
     )
-    worker.run_dashboard_export(4, {}, 42)
+    worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
     assert m.context.payload["skipped_charts"] == [
         {
-            "chart_id": 8,
+            "chart_id": str(UUID(int=8)),
             "chart_name": "Broken",
             "reason": worker.CHART_FAILED,
         }
@@ -362,8 +384,8 @@ def test_chart_query_failures_are_described_without_exposing_exceptions(
     "charts",
     [
         [],
-        [ChartResult(8, "Broken", [], SkipReason.GENERAL)],
-        [ChartResult(8, "Empty", [], None)],
+        [ChartResult(UUID(int=8), "Broken", [], SkipReason.GENERAL)],
+        [ChartResult(UUID(int=8), "Empty", [], None)],
     ],
 )
 def test_no_exportable_charts_fails_clearly_before_google(
@@ -371,7 +393,7 @@ def test_no_exportable_charts_fails_clearly_before_google(
 ) -> None:
     m.results.side_effect = lambda *_: iter(charts)
     with pytest.raises(worker.DashboardExportError, match=worker.NO_CHARTS):
-        worker.run_dashboard_export(4, {}, 42)
+        worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
     m.create.assert_not_called()
     assert m.context.payload["error_message"] == worker.NO_CHARTS
 
@@ -393,7 +415,7 @@ def test_abort_stops_before_acquiring_another_chart(m: _Mocks) -> None:
 
     m.context.after_update = abort_on_progress
     with pytest.raises(worker.DashboardExportAborted, match=worker.CANCELLED):
-        worker.run_dashboard_export(4, {}, 42)
+        worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
     assert acquired == [7]
     m.create.assert_not_called()
 
@@ -409,7 +431,7 @@ def test_writer_receives_abort_checkpoint_and_never_publishes_cancelled_link(
 
     m.create.side_effect = create
     with pytest.raises(worker.DashboardExportAborted, match=worker.CANCELLED):
-        worker.run_dashboard_export(4, {}, 42)
+        worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
     assert "url" not in m.context.payload
     assert m.context.payload["error_message"] == worker.CANCELLED
 
@@ -424,7 +446,7 @@ def test_late_abort_still_publishes_completed_spreadsheet(m: _Mocks) -> None:
         return url
 
     m.create.side_effect = create
-    worker.run_dashboard_export(4, {}, 42)
+    worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
 
     assert m.context.payload["url"] == url
     assert "error_message" not in m.context.payload
@@ -433,6 +455,73 @@ def test_late_abort_still_publishes_completed_spreadsheet(m: _Mocks) -> None:
 def test_google_error_has_a_safe_task_failure_message(m: _Mocks) -> None:
     m.create.side_effect = ValueError("secret-token")
     with pytest.raises(worker.DashboardExportError, match=worker.EXPORT_FAILED):
-        worker.run_dashboard_export(4, {}, 42)
+        worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
     assert m.context.payload["error_message"] == worker.EXPORT_FAILED
     assert "secret-token" not in str(m.context.payload)
+
+
+def test_legacy_integer_task_is_resolved_as_requester(
+    m: _Mocks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Previously queued numeric tasks use the same UUID host contract."""
+
+    def lookup(**filters: Any) -> SimpleNamespace:
+        assert g.user.id == 42
+        assert filters == {"id": 4}
+        return SimpleNamespace(uuid=DASHBOARD_UUID)
+
+    monkeypatch.setattr(dashboard_permissions.DashboardDAO, "find_one_or_none", lookup)
+    worker.run_dashboard_export(4, {}, 42)
+    m.metadata.assert_called_once_with(DASHBOARD_UUID, {})
+    m.results.assert_called_once_with(DASHBOARD_UUID, {})
+    assert m.dashboard_permission.call_args_list == [
+        call(DASHBOARD_UUID),
+        call(DASHBOARD_UUID),
+    ]
+    assert m.context.payload["url"] == m.create.return_value
+
+
+@pytest.mark.parametrize("identifier", ["invalid", "", "4", True, 0, -1, None, 4.0])
+def test_invalid_task_identifier_fails_before_host_queries_or_google(
+    m: _Mocks, identifier: Any
+) -> None:
+    with pytest.raises(worker.DashboardExportError, match=worker.ACCESS_DENIED):
+        worker.run_dashboard_export(identifier, {}, 42)
+    m.dashboard_permission.assert_not_called()
+    m.metadata.assert_not_called()
+    m.results.assert_not_called()
+    m.create.assert_not_called()
+    assert m.context.payload["error_message"] == worker.ACCESS_DENIED
+    assert g.user.id == 99
+
+
+@pytest.mark.parametrize("dashboard", [None, SimpleNamespace(uuid=None)])
+def test_legacy_task_with_missing_dashboard_identity_is_denied(
+    m: _Mocks, monkeypatch: pytest.MonkeyPatch, dashboard: Any
+) -> None:
+    monkeypatch.setattr(
+        dashboard_permissions.DashboardDAO,
+        "find_one_or_none",
+        MagicMock(return_value=dashboard),
+    )
+    with pytest.raises(worker.DashboardExportError, match=worker.ACCESS_DENIED):
+        worker.run_dashboard_export(4, {}, 42)
+    m.metadata.assert_not_called()
+    m.create.assert_not_called()
+
+
+def test_uuid_chart_tabs_truncate_uniquely_and_keep_chart_urls(m: _Mocks) -> None:
+    query = _chart().queries[0]
+    m.results.side_effect = lambda *_: iter(
+        [ChartResult(UUID(int=7), "Sales" * 40, [query, query], None)]
+    )
+    worker.run_dashboard_export(str(DASHBOARD_UUID), {}, 42)
+    tabs = m.create.call_args.args[1]
+    assert all(len(tab.name) <= 100 for tab in tabs)
+    assert len({tab.name.lower() for tab in tabs}) == 3
+    assert all(tab.name.startswith(str(UUID(int=7))) for tab in tabs[1:])
+    mappings = tabs[0].rows
+    assert [row[2] for row in mappings if row[0] in {tab.name for tab in tabs[1:]}] == [
+        "/explore/?slice_id=7",
+        "/explore/?slice_id=7",
+    ]

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
+from uuid import UUID
 
 import pytest
 from michael_s_molina.sqllab_gsheets.errors import INVALID_REQUEST, ExportRejected
@@ -117,7 +118,9 @@ def test_equivalent_filter_maps_share_a_key_despite_ui_changes() -> None:
         }
     )
     original = deepcopy(left)
-    assert dashboard_export_key(7, left, 17) == dashboard_export_key(7, right, 17)
+    assert dashboard_export_key(UUID(int=7), left, 17) == dashboard_export_key(
+        UUID(int=7), right, 17
+    )
     assert left == original
 
 
@@ -138,17 +141,17 @@ def test_keys_separate_users_dashboards_and_effective_filters() -> None:
     changed_value = deepcopy(selected)
     changed_value["f"]["filterState"]["value"] = ["NY"]
     keys = {
-        dashboard_export_key(7, selected, 17),
-        dashboard_export_key(7, selected, 18),
-        dashboard_export_key(8, selected, 17),
-        dashboard_export_key(7, changed_query, 17),
-        dashboard_export_key(7, changed_value, 17),
+        dashboard_export_key(UUID(int=7), selected, 17),
+        dashboard_export_key(UUID(int=7), selected, 18),
+        dashboard_export_key(UUID(int=8), selected, 17),
+        dashboard_export_key(UUID(int=7), changed_query, 17),
+        dashboard_export_key(UUID(int=7), changed_value, 17),
     }
     assert len(keys) == 5
 
 
 def test_explicitly_cleared_filter_does_not_join_saved_defaults() -> None:
     """An absent mask can apply defaults whereas an explicit empty entry clears them."""
-    assert dashboard_export_key(7, {}, 17) != dashboard_export_key(
-        7, snapshot_filters({"f": {"extraFormData": {}}}), 17
+    assert dashboard_export_key(UUID(int=7), {}, 17) != dashboard_export_key(
+        UUID(int=7), snapshot_filters({"f": {"extraFormData": {}}}), 17
     )

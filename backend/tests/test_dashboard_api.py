@@ -33,6 +33,7 @@ from michael_s_molina.sqllab_gsheets.errors import GENERIC_FAILURE, ExportReject
 from michael_s_molina.sqllab_gsheets.filter_hash import dashboard_export_key
 from superset_core.tasks.types import TaskOptions
 
+DASHBOARD_UUID = UUID("c1dcf074-51a9-445c-a9e4-a16c3c437278")
 TASK_ID = UUID("62ca910d-9fd0-4a20-9af9-dc132fd635d1")
 
 
@@ -51,6 +52,11 @@ class _Mocks:
 @pytest.fixture
 def dashboard_mocks(app: Flask, monkeypatch: pytest.MonkeyPatch) -> _Mocks:
     """Use real validation and hashing while isolating authorization and execution."""
+    monkeypatch.setattr(
+        dashboard_permissions.DashboardDAO,
+        "find_one_or_none",
+        MagicMock(return_value=SimpleNamespace(uuid=DASHBOARD_UUID)),
+    )
     worker = MagicMock()
     worker.schedule.return_value = SimpleNamespace(uuid=TASK_ID, properties_dict={})
     data_permission = MagicMock(return_value=True)
@@ -106,13 +112,15 @@ def test_submission_uses_server_identity_snapshot_and_timeout(
             {"task_id": str(TASK_ID), "already_running": False},
         )
     call = dashboard_mocks.worker.schedule.call_args
-    assert call.args[0] == 7 and call.args[2] == 17
+    assert call.args[0] == str(DASHBOARD_UUID) and call.args[2] == 17
+    dashboard_mocks.dashboard_permission.assert_called_once_with(DASHBOARD_UUID)
+    dashboard_permissions.DashboardDAO.find_one_or_none.assert_called_once_with(id=7)
     snapshot = call.args[1]
     assert "ownState" not in snapshot["f"]
     options = call.kwargs["options"]
     assert isinstance(options, TaskOptions)
     assert options.timeout == 123
-    assert options.task_key == dashboard_export_key(7, snapshot, 17)
+    assert options.task_key == dashboard_export_key(DASHBOARD_UUID, snapshot, 17)
     assert options.task_name
     body["activeDataMask"]["f"]["extraFormData"]["filters"][0]["val"].append("NY")
     assert snapshot["f"]["extraFormData"]["filters"][0]["val"] == ["CA"]
@@ -136,6 +144,38 @@ def test_repeated_submission_reports_the_joined_task(dashboard_mocks: _Mocks) ->
 
 
 @pytest.mark.parametrize(
+    "dashboard", [None, SimpleNamespace(uuid=None), SimpleNamespace(uuid="invalid")]
+)
+def test_unresolvable_dashboard_is_denied_without_scheduling(
+    dashboard_mocks: _Mocks, dashboard: Any
+) -> None:
+    """Missing identities must never fall back to the capability check."""
+    dashboard_permissions.DashboardDAO.find_one_or_none.return_value = dashboard
+    with pytest.raises(ExportRejected) as error:
+        api_module.start_dashboard_export({"dashboardId": 7}, 17, "u@x.com")
+    assert (error.value.status, error.value.message) == (
+        403,
+        api_module.PERMISSION_DENIED,
+    )
+    dashboard_mocks.dashboard_permission.assert_not_called()
+    dashboard_mocks.worker.schedule.assert_not_called()
+
+
+def test_dashboard_uuid_is_normalized_before_authorization_and_scheduling(
+    dashboard_mocks: _Mocks,
+) -> None:
+    """The DAO may expose a UUID string; host helpers still receive UUID objects."""
+    dashboard_permissions.DashboardDAO.find_one_or_none.return_value = SimpleNamespace(
+        uuid=str(DASHBOARD_UUID).upper()
+    )
+    api_module.start_dashboard_export({"dashboardId": 7}, 17, "u@x.com")
+    dashboard_mocks.dashboard_permission.assert_called_once_with(DASHBOARD_UUID)
+    args = dashboard_mocks.worker.schedule.call_args.args
+    assert args[0] == str(DASHBOARD_UUID)
+    assert isinstance(args[0], str)
+
+
+@pytest.mark.parametrize(
     "body",
     [
         None,
@@ -147,6 +187,7 @@ def test_repeated_submission_reports_the_joined_task(dashboard_mocks: _Mocks) ->
         {"dashboardId": 0},
         {"dashboardId": -1},
         {"dashboardId": "7"},
+        {"dashboardId": str(DASHBOARD_UUID)},
         {"dashboardId": 7.0},
         {"dashboardId": 7, "activeDataMask": None},
         {"dashboardId": 7, "activeDataMask": {"f": {"extraFormData": []}}},

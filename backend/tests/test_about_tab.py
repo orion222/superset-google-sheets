@@ -17,6 +17,7 @@
 """Metadata tab tests without Google API calls."""
 
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 from michael_s_molina.sqllab_gsheets.about_tab import (
     ExportedTab,
@@ -31,13 +32,17 @@ def test_about_contains_export_state_and_tab_chart_mapping() -> None:
         "Revenue",
         "https://superset.test/dashboard/permalink/filter-snapshot/",
         [AppliedFilter("Region", "EU"), AppliedFilter("Category", "=literal text")],
-        {7: "https://superset.test/explore/?slice_id=7"},
+        {UUID(int=7): "https://superset.test/explore/?slice_id=7"},
     )
     tab = build_about_tab(
         info,
         datetime(2026, 1, 1, 12, 30, tzinfo=timezone(timedelta(hours=2))),
-        [ExportedTab("7 - Sales", "Sales", info.chart_urls[7], 42)],
-        [SkippedChart(8, "Broken", "The chart could not be exported.")],
+        [
+            ExportedTab(
+                f"{UUID(int=7)} - Sales", "Sales", info.chart_urls[UUID(int=7)], 42
+            )
+        ],
+        [SkippedChart(UUID(int=8), "Broken", "The chart could not be exported.")],
     )
 
     assert tab.name == "About"
@@ -48,7 +53,12 @@ def test_about_contains_export_state_and_tab_chart_mapping() -> None:
     assert ["Exported at (UTC)", "2026-01-01 10:30:00 UTC", "", ""] in tab.rows
     assert ["Region", "EU", "", ""] in tab.rows
     assert ["Category", "=literal text", "", ""] in tab.rows
-    assert ["7 - Sales", "Sales", info.chart_urls[7], 42] in tab.rows
+    assert [
+        f"{UUID(int=7)} - Sales",
+        "Sales",
+        info.chart_urls[UUID(int=7)],
+        42,
+    ] in tab.rows
     assert ["Broken", "The chart could not be exported.", "", ""] in tab.rows
 
 
