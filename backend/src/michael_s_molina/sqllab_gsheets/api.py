@@ -17,6 +17,7 @@ from superset_core.rest_api.api import RestApi
 from superset_core.rest_api.decorators import api
 
 from .cells import dataframe_rows
+from .chart_api import ChartExportRequest, capabilities, export_chart
 from .config import sql_lab_max_rows
 from .errors import (
     ExportRejected,
@@ -26,7 +27,13 @@ from .errors import (
     QUERY_FAILED,
     QueryFailed,
 )
-from .export import json_export_endpoint, publish, require_exporter
+from .export import (
+    export_endpoint,
+    json_export_endpoint,
+    publish,
+    reject_too_many_rows,
+    require_exporter,
+)
 from .google_sheets import Tab
 
 logger = logging.getLogger(__name__)
@@ -103,13 +110,7 @@ def execute_query(
     if data is None:
         return pd.DataFrame()
 
-    if len(data.index) > max_rows:
-        raise ExportRejected(
-            400,
-            f"Too large for Google Sheets (more than {max_rows} rows). "
-            "Use Export to .CSV instead.",
-        )
-
+    reject_too_many_rows(len(data.index), max_rows)
     return data
 
 
@@ -216,3 +217,27 @@ class GSheetsExportAPI(RestApi):
             datetime.now(timezone.utc),
         )
         return self.response(200, spreadsheet_url=url, row_count=row_count)
+
+    @expose("/chart/", methods=("POST",))
+    @protect()
+    @permission_name("export")
+    def export_chart_to_sheets(self) -> Response:
+        """Export a chart's query results to a new Google Sheet."""
+        return json_export_endpoint(self, self._export_chart)
+
+    def _export_chart(self, body: dict[str, Any]) -> Response:
+        url = export_chart(
+            ChartExportRequest.parse(body),
+            g.user.email,
+            datetime.now(timezone.utc),
+        )
+        return self.response(200, spreadsheet_url=url)
+
+    @expose("/chart/capabilities", methods=("GET",))
+    @protect()
+    @permission_name("export")
+    def chart_capabilities(self) -> Response:
+        """Report whether the current user can export charts to Google Sheets."""
+        return export_endpoint(
+            self, lambda: self.response(200, **capabilities(g.user.email))
+        )

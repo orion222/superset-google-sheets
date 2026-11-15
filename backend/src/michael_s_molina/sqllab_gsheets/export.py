@@ -18,11 +18,24 @@ logger = logging.getLogger(__name__)
 EXPORT_PERMISSION_DENIED = "You don't have permission to export to Google Sheets."
 
 
+def can_export_user(email: str | None) -> bool:
+    return bool(email) and can_export_data()
+
+
 def require_exporter(email: str | None) -> str:
     """Return the exporter's email or reject the export before resource lookup."""
-    if not email or not can_export_data():
+    if not email or not can_export_user(email):
         raise ExportRejected(403, EXPORT_PERMISSION_DENIED)
     return email
+
+
+def reject_too_many_rows(row_count: int, limit: int) -> None:
+    if row_count > limit:
+        raise ExportRejected(
+            400,
+            f"Too large for Google Sheets (more than {limit} rows). "
+            "Use Export to .CSV instead.",
+        )
 
 
 def publish(name: str, tabs: list[Tab], email: str, now: datetime) -> str:
@@ -35,18 +48,27 @@ def publish(name: str, tabs: list[Tab], email: str, now: datetime) -> str:
         raise ExportRejected(500, GENERIC_FAILURE) from ex
 
 
-def json_export_endpoint(
-    api: RestApi,
-    handler: Callable[[dict[str, Any]], Response],
-) -> Response:
-    """Parse a JSON object and map safe export errors to endpoint responses."""
+def export_endpoint(api: RestApi, handler: Callable[[], Response]) -> Response:
+    """Map safe export errors to endpoint responses."""
     try:
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            raise ExportRejected(400, INVALID_REQUEST)
-        return handler(body)
+        return handler()
     except ExportRejected as ex:
         return api.response(ex.status, message=ex.message)
     except Exception:
         logger.exception("Unexpected error in Google Sheets export")
         return api.response(500, message=GENERIC_FAILURE)
+
+
+def json_export_endpoint(
+    api: RestApi,
+    handler: Callable[[dict[str, Any]], Response],
+) -> Response:
+    """Parse a JSON object, then run the handler with export errors mapped."""
+
+    def run() -> Response:
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            raise ExportRejected(400, INVALID_REQUEST)
+        return handler(body)
+
+    return export_endpoint(api, run)
