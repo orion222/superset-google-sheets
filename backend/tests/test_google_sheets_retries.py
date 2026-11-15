@@ -29,6 +29,7 @@ import httplib2
 import pytest
 from flask import Flask
 from googleapiclient.errors import HttpError
+from googleapiclient.http import _should_retry_response
 
 from michael_s_molina.sqllab_gsheets import google_sheets as writer
 
@@ -54,9 +55,21 @@ class _Request:
         self._execute = execute
 
     def execute(self, num_retries: int = 0) -> dict[str, Any]:
-        """Apply the operation once; the application decides whether to retry."""
-        assert num_retries == 0
-        return self._execute()
+        """Mirror googleapiclient's retry boundary for the recorded operation."""
+        for attempt in range(num_retries + 1):
+            try:
+                return self._execute()
+            except HttpError as ex:
+                if attempt == num_retries or not _should_retry_response(
+                    ex.resp.status, ex.content
+                ):
+                    raise
+                writer.time.sleep(2**attempt)
+            except ConnectionError:
+                if attempt == num_retries:
+                    raise
+                writer.time.sleep(2**attempt)
+        raise AssertionError("unreachable")
 
 
 class _RetryGoogle:
@@ -183,8 +196,10 @@ class _RetryGoogle:
         def effect() -> dict[str, Any]:
             """Commit valid structural batches atomically, like Google Sheets."""
             file_id = kwargs["spreadsheetId"]
+            self.formats[file_id] = deepcopy(
+                [request for request in requests if "repeatCell" in request]
+            )
             if not structural:
-                self.formats[file_id] = deepcopy(requests)
                 return {}
             grid = dict(self.grids[file_id])
             replies = []
@@ -255,6 +270,29 @@ def _export() -> str:
     return writer.create_spreadsheet(
         "Sales", [writer.Tab("Sales", [["a"], [1]], [])], "u@x.com"
     )
+
+
+def test_execute_delegates_retries_only_for_repeat_safe_requests() -> None:
+    calls: list[int] = []
+
+    class Request:
+        def execute(self, num_retries: int = 0) -> dict[str, bool]:
+            calls.append(num_retries)
+            return {"ok": True}
+
+    writer._execute(Request(), retry_safe=True)
+    writer._execute(Request())
+
+    assert calls == [writer.MAX_ATTEMPTS - 1, 0]
+
+
+def test_lost_create_response_waits_before_searching(retry_google: _RetryGoogle) -> None:
+    google = retry_google
+    google.fail("files.create", _http_error(500))
+
+    assert _export().endswith("/file-1/edit")
+    assert google.sleeps == [0.5]
+    assert google.executions["files.create"] == 1
 
 
 @pytest.mark.parametrize("failure", [500, 503, "transport"])
@@ -410,15 +448,14 @@ def test_non_idempotent_mutations_are_not_replayed(
     assert google.trashed == {"file-1"}
 
 
-@pytest.mark.parametrize("operation", ["values", "format"])
-def test_absolute_writes_can_retry_after_a_committed_error(
-    retry_google: _RetryGoogle, operation: str
+def test_absolute_value_writes_can_retry_after_a_committed_error(
+    retry_google: _RetryGoogle,
 ) -> None:
-    """Replaying absolute value or format assignments leaves one completed export."""
+    """Replaying absolute value assignments leaves one completed export."""
     google = retry_google
-    google.fail(operation, _http_error(500))
+    google.fail("values", _http_error(500))
     assert _export().endswith("/file-1/edit")
-    assert google.executions[operation] == 2
+    assert google.executions["values"] == 2
     assert list(google.created) == ["file-1"] and google.shared == {"file-1"}
     assert google.values["file-1"][0]["values"] == [["a"], [1]]
     assert google.formats["file-1"] and not google.trashed
