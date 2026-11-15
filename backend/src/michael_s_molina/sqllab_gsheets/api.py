@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime
 from typing import Any
 
@@ -15,7 +16,23 @@ from superset_core.rest_api.api import RestApi
 from superset_core.rest_api.decorators import api
 from superset_core.queries.types import QueryOptions, QueryStatus
 
+from .config import sync_max_rows
+
 logger = logging.getLogger(__name__)
+
+
+def sql_lab_max_rows() -> int:
+    """Most rows a SQL Lab export takes; kept below SQL_MAX_ROW so truncation shows."""
+    cap = sync_max_rows()
+    sql_max_row = current_app.config.get("SQL_MAX_ROW")
+    if (
+        isinstance(sql_max_row, (int, float))
+        and not isinstance(sql_max_row, bool)
+        and math.isfinite(sql_max_row)
+        and int(sql_max_row) > 0
+    ):
+        cap = min(cap, int(sql_max_row) - 1)
+    return cap
 
 
 @api(id="sqllab_gsheets", name="SQL Lab Google Sheets Export")
@@ -110,6 +127,7 @@ class GSheetsExportAPI(RestApi):
         options = QueryOptions(
             catalog=catalog,
             schema=schema,
+            limit=sql_lab_max_rows(),
         )
 
         result = database.execute(sql, options)
