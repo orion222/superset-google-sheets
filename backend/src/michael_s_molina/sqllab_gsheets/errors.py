@@ -1,5 +1,19 @@
 GENERIC_FAILURE = "Couldn't create the Google Sheet. Try again later."
 INVALID_REQUEST = "Invalid export request."
+QUERY_FAILED = "The query failed. Run it in SQL Lab to see the error."
+
+
+class QueryFailed(Exception):
+    """A query returned a non-success status with a driver error message."""
+
+
+def is_security_exception(error: BaseException) -> bool:
+    """Recognize Superset security exceptions without importing Superset itself."""
+    return is_named_exception(error, "SupersetSecurityException")
+
+
+class GoogleSheetsConfigError(Exception):
+    """Raised when a required GSHEETS_* setting is missing or invalid."""
 
 
 class ExportRejected(Exception):

@@ -15,7 +15,7 @@ from michael_s_molina.sqllab_gsheets.errors import ExportRejected
 from michael_s_molina.sqllab_gsheets.google_sheets import GoogleExportError
 
 MODULE = "michael_s_molina.sqllab_gsheets.chart_api"
-FLOW = "michael_s_molina.sqllab_gsheets.export_flow"
+EXPORT_MODULE = "michael_s_molina.sqllab_gsheets.export"
 API_MODULE = "michael_s_molina.sqllab_gsheets.api"
 NOW = datetime(2026, 11, 3, 10, 5, tzinfo=timezone.utc)
 PAYLOAD = {"form_data": {}}
@@ -45,8 +45,8 @@ class ChildSupersetSecurityException(SupersetSecurityException):
 def m(app):
     with (
         patch(f"{MODULE}.run_query_context") as run,
-        patch(f"{FLOW}.can_export_data", return_value=True) as can,
-        patch(f"{FLOW}.create_spreadsheet") as create,
+        patch(f"{EXPORT_MODULE}.can_export_data", return_value=True) as can,
+        patch(f"{EXPORT_MODULE}.create_spreadsheet") as create,
     ):
         run.return_value = ONE
         create.return_value = "https://docs.google.com/spreadsheets/d/f/edit"
@@ -175,7 +175,7 @@ def test_too_many_rows_is_400_before_any_google_call(app, m):
 
 def test_too_many_cells_is_400_before_any_google_call(app, m):
     m.run_query_context.return_value = ONE * 2
-    with patch("michael_s_molina.sqllab_gsheets.google_sheets.MAX_CELLS", 3):
+    with patch("michael_s_molina.sqllab_gsheets.tabs.MAX_CELLS", 3):
         with pytest.raises(ExportRejected) as e:
             export_chart(PAYLOAD, "x", "u@x.com", NOW)
     assert e.value.status == 400

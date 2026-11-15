@@ -14,13 +14,14 @@ from superset_core.exports.export import (
 from superset_core.exports.types import ChartQueryResult
 
 from .cells import query_rows, temporal_columns
+from .chart import tab_label
 from .config import sync_max_rows
 from .errors import ExportRejected, INVALID_REQUEST, is_named_exception
-from .export_flow import (
-    authorize_export,
+from .export import (
     can_export_user,
-    deliver_export,
+    publish,
     reject_too_many_rows,
+    require_exporter,
 )
 from .google_sheets import Tab
 
@@ -81,14 +82,6 @@ class ChartExportRequest:
 def capabilities(email: str | None) -> dict[str, bool]:
     # The host disables the items for users who can't download, so they stay visible.
     return {"can_export": can_export_user(email)}
-
-
-def tab_label(chart_id: int | None, chart_name: str, index: int) -> str:
-    # Drill By sends slice_id 0, so a falsy ID means the chart has no identity.
-    if not chart_id:
-        return chart_name if index == 0 else f"{chart_name} ({index})"
-    prefix = str(chart_id) if index == 0 else f"{chart_id}.{index}"
-    return f"{prefix} - {chart_name}"
 
 
 def _chart_id_from_payload(payload: dict[str, Any]) -> int | None:
@@ -173,7 +166,7 @@ def export_chart(
     email: str | None,
     now: datetime,
 ) -> str:
-    email = authorize_export(email)
+    email = require_exporter(email)
 
     limit = sync_max_rows()
     payload = _capped_query_context(chart_request.payload, limit + 1)
@@ -185,4 +178,4 @@ def export_chart(
 
     name = chart_request.chart_name or UNTITLED
     tabs = _tabs(chart_request, name, results)
-    return deliver_export(name, tabs, email, now)
+    return publish(name, tabs, email, now)
