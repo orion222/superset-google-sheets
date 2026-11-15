@@ -26,14 +26,18 @@ from typing import Literal
 
 import pytest
 from google.auth.credentials import AnonymousCredentials
-from google.auth.exceptions import TransportError
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from michael_s_molina.sqllab_gsheets.google_http import GoogleHttp
 
 ResponseMode = Literal[
-    "lost_response", "server_error", "redirect", "unauthorized", "success"
+    "lost_response",
+    "lost_read_response",
+    "server_error",
+    "redirect",
+    "unauthorized",
+    "success",
 ]
 
 
@@ -90,6 +94,9 @@ def google_endpoint(monkeypatch: pytest.MonkeyPatch) -> Iterator[GoogleEndpoint]
         def do_GET(self) -> None:
             """Expose committed files to a subsequent read-only recovery request."""
             endpoint.reads += 1
+            if endpoint.mode == "lost_read_response" and endpoint.reads == 1:
+                self.close_connection = True
+                return
             self.send_json(
                 200, {"files": [{"id": file_id} for file_id in endpoint.created_ids]}
             )
@@ -136,7 +143,7 @@ def test_real_google_client_does_not_replay_creation(
             body={"name": "Test export", "appProperties": {"export_id": "marker"}}
         )
         if mode == "lost_response":
-            with pytest.raises(TransportError):
+            with pytest.raises(ConnectionError):
                 request.execute()
         elif expected_status != 200:
             with pytest.raises(HttpError) as error:
@@ -150,5 +157,29 @@ def test_real_google_client_does_not_replay_creation(
             q="appProperties has { key='export_id' and value='marker' }"
         ).execute() == {"files": [{"id": "file-1"}]}
         assert google_endpoint.reads == 1
+    finally:
+        http.close()
+
+
+def test_real_google_client_retries_requested_transport_failures(
+    google_endpoint: GoogleEndpoint, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeat-safe requests can use googleapiclient's transport retries."""
+    google_endpoint.mode = "lost_read_response"
+    monkeypatch.setattr("googleapiclient.http.time.sleep", lambda _seconds: None)
+    http = GoogleHttp(AnonymousCredentials())
+    try:
+        drive = build(
+            "drive",
+            "v3",
+            http=http,
+            cache_discovery=False,
+            static_discovery=True,
+            client_options={"api_endpoint": google_endpoint.url},
+        )
+        request = drive.files().list(q="marker")
+
+        assert request.execute(num_retries=4) == {"files": []}
+        assert google_endpoint.reads == 2
     finally:
         http.close()

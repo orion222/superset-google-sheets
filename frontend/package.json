@@ -4,6 +4,7 @@
   "main": "dist/main.js",
   "scripts": {
     "test": "jest",
+    "test:bundle": "jest --config jest.bundle.config.js --runInBand",
     "start": "webpack serve --mode development",
     "build": "webpack --stats-error-details --mode production"
   },

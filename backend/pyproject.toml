@@ -3,6 +3,7 @@ name = "sqllab_gsheets"
 version = "1.1.0"
 license = "Apache-2.0"
 description = "Export SQL Lab query results to Google Sheets"
+requires-python = ">=3.10"
 dependencies = [
     "apache-superset-core>=0.1.0",
     "google-auth[requests]>=2.0.0",
@@ -16,6 +17,9 @@ gsheets-personal-setup = "michael_s_molina.sqllab_gsheets.personal_setup:main"
 [project.optional-dependencies]
 test = ["pytest>=8", "flask>=2.3", "mypy>=1.10", "pandas-stubs"]
 setup = ["google-auth-oauthlib>=1.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
 
 [tool.apache_superset_extensions.build]
 include = [

@@ -1,26 +1,18 @@
 import { toasts } from '@apache-superset/core';
 import { exportChart } from './chartExport';
-import { EXTENSION_BASE } from './client';
+import { err, mockFetch, ok } from '../test/httpMock';
 
-const fetchMock = jest.fn();
-global.fetch = fetchMock as unknown as typeof fetch;
-
-const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
-const err = (status: number, body: unknown) => ({
-  ok: false,
-  status,
-  json: async () => body,
-});
+const fetchMock = mockFetch();
 
 beforeEach(() => {
   jest.clearAllMocks();
 });
 
 test('posts the payload and shows a success toast with the link', async () => {
-  fetchMock.mockResolvedValue(ok({ url: 'https://docs.google.com/spreadsheets/d/f/edit' }));
+  fetchMock.mockResolvedValue(ok({ spreadsheet_url: 'https://docs.google.com/spreadsheets/d/f/edit' }));
   await exportChart({ getPayload: async () => ({ queries: [] }), chartName: 'Sales', canDownload: true });
   expect(fetchMock).toHaveBeenCalledWith(
-    `${EXTENSION_BASE}/chart/`,
+    '/extensions/michael-s-molina/sqllab-gsheets/chart/',
     expect.objectContaining({
       method: 'POST',
       body: JSON.stringify({ payload: { queries: [] }, chartName: 'Sales' }),
@@ -35,12 +27,16 @@ test('posts the payload and shows a success toast with the link', async () => {
 });
 
 test('pivoted export overrides result_type', async () => {
-  fetchMock.mockResolvedValue(ok({ url: 'u' }));
+  fetchMock.mockResolvedValue(ok({ spreadsheet_url: 'u' }));
+  const payload = { result_type: 'full' };
   await exportChart(
-    { getPayload: async () => ({ result_type: 'full' }), chartName: 'P', canDownload: true },
+    { getPayload: async () => payload, chartName: 'P', canDownload: true },
     'post_processed',
   );
-  expect(JSON.parse(fetchMock.mock.calls[0][1].body).payload.result_type).toBe('post_processed');
+  const requestBody = fetchMock.mock.calls[0]?.[1]?.body;
+  expect(typeof requestBody).toBe('string');
+  expect(JSON.parse(requestBody as string).payload.result_type).toBe('post_processed');
+  expect(payload.result_type).toBe('full');
 });
 
 test('server message shown as a danger toast and the pending toast dismissed', async () => {

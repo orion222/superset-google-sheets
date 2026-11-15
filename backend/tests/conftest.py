@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,7 @@ import pytest
 import superset_core.rest_api.decorators as _decorators
 from flask import Flask
 from googleapiclient.errors import HttpError
+from googleapiclient.http import _should_retry_response
 
 
 # Outside a running Superset the real decorator raises NotImplementedError; this must
@@ -50,13 +52,23 @@ class FakeGoogle:
     def _request(self, op: str, result: Any) -> MagicMock:
         request = MagicMock(name=f"request:{op}")
 
-        def execute() -> Any:
-            self.call_order.append((op,))
-            status, times = self._failures.get(op, (0, 0))
-            if times:
-                self._failures[op] = (status, times - 1)
-                raise HttpError(httplib2.Response({"status": status}), b"quota details")
-            return result() if callable(result) else result
+        def execute(num_retries: int = 0) -> Any:
+            for attempt in range(num_retries + 1):
+                self.call_order.append((op,))
+                status, times = self._failures.get(op, (0, 0))
+                if times:
+                    self._failures[op] = (status, times - 1)
+                    error = HttpError(
+                        httplib2.Response({"status": status}), b"quota details"
+                    )
+                    if attempt == num_retries or not _should_retry_response(
+                        error.resp.status, error.content
+                    ):
+                        raise error
+                    time.sleep(2**attempt)
+                    continue
+                return result() if callable(result) else result
+            raise AssertionError("unreachable")
 
         request.execute.side_effect = execute
         return request
