@@ -1,5 +1,4 @@
 # superset-google-sheets
-An extension of https://github.com/michael-s-molina/superset-extensions/tree/main/sqllab-gsheets
 
 Adds **Export to Google Sheets** to Superset's chart download menus and to SQL Lab. Each export creates a new spreadsheet in a Google Drive folder and shares it with the exporting user, unless the exporter is the personal Google account that owns the file. The folder lives in a Shared Drive (service account) or in a personal Google account's Drive.
 
@@ -114,12 +113,15 @@ Exports are owned by one personal Google account. No Shared Drive is needed.
    - Set the publishing status to **In production**. Under **Testing**, refresh tokens expire after 7 days.
    - An unverified app in production with only `drive.file` needs no verification. Consent may show an "unverified app" screen once, which the owner clicks through.
 3. Create an OAuth client of type **Desktop app** and download its JSON.
-4. Install the setup dependencies and run the script from the repository root. It opens a browser for consent, creates the export folder, and prints the config:
+4. Install the setup dependencies and run the setup command. It opens a browser for consent, creates the export folder, and prints the config:
 
    ```bash
    pip install -e "backend[setup]"
-   python scripts/gsheets_personal_setup.py path/to/client_secret.json
+   gsheets-personal-setup path/to/client_secret.json
    ```
+
+   From a repository checkout, run:
+   `python scripts/gsheets_personal_setup.py path/to/client_secret.json`.
 
    Use `--folder-name NAME` to name the folder. The default is `Superset exports`.
 
@@ -198,9 +200,9 @@ Removing the permission from Gamma or Alpha in the UI does not last: the role sy
 
 ## Export retries
 
-Each export creates its spreadsheet once, with a private request marker. If Google returns a server error or loses the response, the extension searches for that marked spreadsheet and continues only when it finds exactly one match. An empty, incomplete, or failed search never causes another creation request. If recovery cannot identify the file, the export fails and logs its marker for investigation; an unreturned file can remain in Drive. Separate export clicks still create separate spreadsheets.
+Each export creates its spreadsheet once, with a private request marker. If Google returns a server error or loses the response, the extension waits briefly, then makes a best-effort search for that marked spreadsheet and continues only when it finds exactly one match. An empty, incomplete, or failed search never causes another creation request. If recovery cannot identify the file, the export fails and logs its marker for investigation; an unreturned file can remain in Drive. Separate export clicks still create separate spreadsheets.
 
-Fixed-range value writes, formatting and cleanup retain bounded retries. Tab creation and sharing requests are attempted once; a subsequent failure triggers cleanup of the known spreadsheet. The authenticated HTTP transport also disables implicit retries and redirects, so a lost response cannot silently replay a creation request below the export code.
+Fixed-range value writes and cleanup retain bounded retries. The sheet creation and formatting batch and the sharing request are attempted once; a subsequent failure triggers cleanup of the known spreadsheet. The authenticated HTTP transport also disables implicit retries and redirects, so a lost response cannot silently replay a creation request below the export code.
 
 ## Limits
 
@@ -211,6 +213,75 @@ These exports are refused with a "Too large for Google Sheets…" message before
 - Any export over Google's limit of 10,000,000 cells per spreadsheet, counted as rows (including the header row) times columns, summed over tabs.
 
 ## Development
+
+### Running against a local Superset
+
+Dev mode loads the extension straight from this folder, so you don't need to bundle a `.supx` file. You need a Superset checkout that includes the core APIs listed under [Requirements](#requirements), with its own virtualenv (`.venv` below).
+
+1. Install the extension's Python dependencies into Superset's virtualenv. Superset doesn't install an extension's dependencies:
+
+   ```bash
+   /path/to/superset/.venv/bin/pip install "google-api-python-client>=2.0.0" "google-auth>=2.0.0"
+   ```
+
+2. Set up a service account and a Shared Drive as described in [Setting up the service account](#setting-up-the-service-account) and [Shared Drive setup](#shared-drive-setup).
+
+3. Add the following to your `superset_config.py`. If you don't already have one, create it and point `SUPERSET_CONFIG_PATH` at it:
+
+   ```python
+   import json
+
+   FEATURE_FLAGS = {"ENABLE_EXTENSIONS": True}
+   LOCAL_EXTENSIONS = ["/path/to/superset-google-sheets"]
+
+   with open("/path/to/service-account.json") as f:
+       GSHEETS_CREDENTIALS = json.load(f)
+   GSHEETS_FOLDER_ID = "your-shared-drive-folder-id"
+   ```
+
+4. Build the extension and rebuild it whenever a file changes. Superset reads `dist/`, so run this before starting Superset:
+
+   ```bash
+   cd /path/to/superset-google-sheets
+   /path/to/superset/.venv/bin/superset-extensions dev
+   ```
+
+5. In a second terminal, start the Superset backend. `superset init` creates the `can export on GoogleSheets` permission:
+
+   ```bash
+   cd /path/to/superset
+   .venv/bin/superset init
+   .venv/bin/superset run -p 8088 --reload --debugger
+   ```
+
+6. In a third terminal, start the Superset frontend:
+
+   ```bash
+   cd /path/to/superset/superset-frontend
+   npm run dev-server
+   ```
+
+7. Give your Superset user an email address under **Settings > List Users**. Without one, the menu items don't appear.
+
+With Docker Compose instead: the dev config already turns on `ENABLE_EXTENSIONS` and loads `.supx` files from `docker/extensions/`. Run `superset-extensions bundle`, copy the `.supx` file there, install the two Google packages inside the container, and restart it.
+
+### Manual checks
+
+- Open a chart, choose **Download**, then **Export to Google Sheets**. A "Sending to Google Sheets…" toast appears, then a success toast with **Open in Google Sheets**. The file is in the Shared Drive folder and shared with your email.
+- A pivot table also shows **Export pivoted to Google Sheets**.
+- The item also appears in:
+  - a dashboard chart's **Download** menu;
+  - the standalone chart view with its download control (`?standalone=1&show_download=true`);
+  - **Drill to Detail**;
+  - **Drill By**;
+  - SQL Lab's editor menu.
+- These exports are refused:
+  - SQL containing `{{ }}`: refused as templated SQL.
+  - A chart over the row limit. Set `GSHEETS_EXPORT_SYNC_MAX_ROWS = 10` to try it with a small chart: refused as too large.
+  - A SQL Lab export by a Gamma user without SQL Lab rights: refused with a permission error.
+- Export a chart with about 100,000 rows and 20 columns, and check that it finishes within your web server's request timeout.
+
+### Tests
 
 Backend tests:
 
@@ -229,3 +300,7 @@ cd frontend && npm install && npm test
 ```
 
 The upstream README is kept in `ORIGINAL_README.md`.
+
+## Credits
+
+This is originally an extension of https://github.com/michael-s-molina/superset-extensions/tree/main/sqllab-gsheets

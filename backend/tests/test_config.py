@@ -1,13 +1,15 @@
+
+import pandas as pd
 import pytest
 
 from michael_s_molina.sqllab_gsheets.config import (
     credentials_info,
     folder_id,
     export_timeout_seconds,
-    GoogleSheetsConfigError,
     sql_lab_max_rows,
     sync_max_rows,
 )
+from michael_s_molina.sqllab_gsheets.errors import GoogleSheetsConfigError
 
 
 def test_defaults(app):
@@ -88,6 +90,27 @@ def test_json_string_credentials_rejected(app):
     app.config["GSHEETS_CREDENTIALS"] = '{"type": "service_account"}'
     with pytest.raises(GoogleSheetsConfigError, match="dict"):
         credentials_info()
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "fn"),
+    [
+        ("GSHEETS_FOLDER_ID", 123, folder_id),
+        ("GSHEETS_FOLDER_ID", "   ", folder_id),
+        ("GSHEETS_CREDENTIALS", ["service_account"], credentials_info),
+        ("GSHEETS_EXPORT_SYNC_MAX_ROWS", "100", sync_max_rows),
+        ("GSHEETS_EXPORT_SYNC_MAX_ROWS", 0, sync_max_rows),
+        ("GSHEETS_EXPORT_SYNC_MAX_ROWS", True, sync_max_rows),
+        ("GSHEETS_EXPORT_TIMEOUT_SECONDS", "900", export_timeout_seconds),
+        ("GSHEETS_EXPORT_TIMEOUT_SECONDS", 0, export_timeout_seconds),
+        ("GSHEETS_EXPORT_TIMEOUT_SECONDS", float("nan"), export_timeout_seconds),
+        ("GSHEETS_EXPORT_TIMEOUT_SECONDS", float("inf"), export_timeout_seconds),
+    ],
+)
+def test_invalid_config_values_raise(app, key, value, fn):
+    app.config[key] = value
+    with pytest.raises(GoogleSheetsConfigError):
+        fn()
 
 
 @pytest.mark.parametrize(

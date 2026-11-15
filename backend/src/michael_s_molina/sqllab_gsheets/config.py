@@ -1,45 +1,80 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, TypeVar
 
 from flask import current_app
 
+from .auth import CREDENTIAL_FACTORIES
+from .errors import GoogleSheetsConfigError
+
 DEFAULT_SYNC_MAX_ROWS = 100_000
 DEFAULT_EXPORT_TIMEOUT_SECONDS = 900
-CREDENTIAL_TYPES = ("service_account", "authorized_user")
+_RENAMED = {
+    "GSHEETS_CREDENTIALS": "GSHEETS_SERVICE_ACCOUNT",
+    "GSHEETS_FOLDER_ID": "GSHEETS_SHARED_DRIVE_FOLDER_ID",
+}
 
+T = TypeVar("T")
 
-class GoogleSheetsConfigError(Exception):
-    """Raised when a GSHEETS_* Superset config key is missing, empty, or invalid."""
-
-
-def _required(key: str, renamed_from: str | None = None) -> Any:
+def _required(key: str, expected_type: type[T]) -> T:
     value = current_app.config.get(key)
-    if not value:
+    if not value or (isinstance(value, str) and not value.strip()):
+        renamed_from = _RENAMED.get(key)
         if renamed_from and current_app.config.get(renamed_from):
             raise GoogleSheetsConfigError(f"{renamed_from} was renamed to {key}")
         raise GoogleSheetsConfigError(f"{key} config is not set")
+    if not isinstance(value, expected_type):
+        raise GoogleSheetsConfigError(
+            f"{key} config must be a {expected_type.__name__}"
+        )
     return value
 
 
 def credentials_info() -> dict[str, Any]:
-    info = _required("GSHEETS_CREDENTIALS", renamed_from="GSHEETS_SERVICE_ACCOUNT")
+    info = _required("GSHEETS_CREDENTIALS", object)
     if not isinstance(info, dict):
-        raise GoogleSheetsConfigError("GSHEETS_CREDENTIALS must be a dict, not a JSON string")
-    if info.get("type") not in CREDENTIAL_TYPES:
         raise GoogleSheetsConfigError(
-            f"GSHEETS_CREDENTIALS type must be one of: {', '.join(CREDENTIAL_TYPES)}"
+            "GSHEETS_CREDENTIALS must be a dict, not a JSON string"
+        )
+    credential_type = info.get("type")
+    if (
+        not isinstance(credential_type, str)
+        or credential_type not in CREDENTIAL_FACTORIES
+    ):
+        raise GoogleSheetsConfigError(
+            "GSHEETS_CREDENTIALS type must be one of: "
+            f"{', '.join(CREDENTIAL_FACTORIES)}"
         )
     return info
 
 
 def folder_id() -> str:
-    return _required("GSHEETS_FOLDER_ID", renamed_from="GSHEETS_SHARED_DRIVE_FOLDER_ID")
+    return _required("GSHEETS_FOLDER_ID", str)
 
 
 def sync_max_rows() -> int:
-    return current_app.config.get("GSHEETS_EXPORT_SYNC_MAX_ROWS", DEFAULT_SYNC_MAX_ROWS)
+    key = "GSHEETS_EXPORT_SYNC_MAX_ROWS"
+    value = current_app.config.get(key, DEFAULT_SYNC_MAX_ROWS)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise GoogleSheetsConfigError(f"{key} config must be a positive integer")
+    return value
+
+
+def export_timeout_seconds() -> float:
+    key = "GSHEETS_EXPORT_TIMEOUT_SECONDS"
+    value = current_app.config.get(key, DEFAULT_EXPORT_TIMEOUT_SECONDS)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise GoogleSheetsConfigError(f"{key} config must be a positive finite number")
+    try:
+        timeout = float(value)
+    except OverflowError as ex:
+        raise GoogleSheetsConfigError(
+            f"{key} config must be a positive finite number"
+        ) from ex
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise GoogleSheetsConfigError(f"{key} config must be a positive finite number")
+    return timeout
 
 
 def sql_lab_max_rows() -> int:
@@ -54,9 +89,3 @@ def sql_lab_max_rows() -> int:
     ):
         cap = min(cap, int(sql_max_row) - 1)
     return cap
-
-
-def export_timeout_seconds() -> int:
-    return current_app.config.get(
-        "GSHEETS_EXPORT_TIMEOUT_SECONDS", DEFAULT_EXPORT_TIMEOUT_SECONDS
-    )

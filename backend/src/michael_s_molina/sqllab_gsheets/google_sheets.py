@@ -5,83 +5,63 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
-from google.auth.exceptions import RefreshError, TransportError
-from google.oauth2 import credentials as user_credentials, service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from httplib2 import HttpLib2Error
 
+from . import auth
+from .chart import tab_label
 from .cells import CellValue
-from .config import credentials_info, folder_id
-from .errors import ExportRejected
+from .config import credentials_info, export_timeout_seconds, folder_id
+from .errors import GENERIC_FAILURE
 from .google_http import GoogleHttp
+from .tabs import MAX_CELLS, Tab, check_cell_limit
 
 logger = logging.getLogger(__name__)
 
-SERVICE_ACCOUNT_SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-USER_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 MAX_WRITE_BYTES = 2_000_000
 MAX_ATTEMPTS = 5
-RETRYABLE_STATUSES = {429, 500, 503}
-# Google's per-spreadsheet cell limit.
-MAX_CELLS = 10_000_000
 DATE_FORMAT = {"type": "DATE_TIME", "pattern": "yyyy-mm-dd hh:mm:ss"}
-# Sheet ID Google assigns to the tab every new spreadsheet starts with.
+# New spreadsheets start with a default tab whose ID is 0.
 DEFAULT_SHEET_ID = 0
 SPREADSHEET_MIME_TYPE = "application/vnd.google-apps.spreadsheet"
 EXPORT_ID_PROPERTY = "superset_export_id"
 
 
 @dataclass(frozen=True)
-class Tab:
-    name: str
-    rows: list[list[CellValue]]
-    temporal_columns: list[int]
+class CreatedFile:
+    file_id: str
+    owner_emails: tuple[str, ...]
 
 
 class GoogleExportError(Exception):
     def __init__(self) -> None:
-        super().__init__("Couldn't create the Google Sheet. Try again later.")
-
-
-def tab_label(chart_id: int | None, chart_name: str, index: int) -> str:
-    # Drill By sends slice_id 0, so a falsy ID means the chart has no identity.
-    if not chart_id:
-        return chart_name if index == 0 else f"{chart_name} ({index})"
-    prefix = str(chart_id) if index == 0 else f"{chart_id}.{index}"
-    return f"{prefix} - {chart_name}"
-
-
-def check_cell_limit(tabs: list[Tab]) -> None:
-    """Refuse tabs that would exceed Google's cell limit, before any Google call."""
-    cells = sum(len(tab.rows) * len(tab.rows[0]) for tab in tabs if tab.rows)
-    if cells > MAX_CELLS:
-        raise ExportRejected(
-            400,
-            f"Too large for Google Sheets ({cells:,} cells, limit {MAX_CELLS:,}). "
-            "Use Export to .CSV instead.",
-        )
+        super().__init__(GENERIC_FAILURE)
 
 
 def _execute(request: Any, *, retry_safe: bool = False) -> Any:
     """Retry only operations whose repeated application has the same outcome."""
-    attempts = MAX_ATTEMPTS if retry_safe else 1
-    for attempt in range(attempts):
-        try:
-            return request.execute()
-        except HttpError as ex:
-            retryable = getattr(ex.resp, "status", None) in RETRYABLE_STATUSES
-            if not retryable or attempt == attempts - 1:
-                raise
-            time.sleep(2**attempt)
-    raise AssertionError("unreachable")
+    return request.execute(num_retries=MAX_ATTEMPTS - 1 if retry_safe else 0)
+
+
+def _is_ambiguous(error: Exception) -> bool:
+    if isinstance(error, HttpError):
+        status = getattr(error.resp, "status", None)
+        return status is None or status >= 500 or status in {408, 429}
+    return isinstance(error, OSError)
+
+
+def _file_metadata(info: dict[str, Any]) -> CreatedFile:
+    owners = tuple(
+        owner["emailAddress"]
+        for owner in info.get("owners", [])
+        if owner.get("emailAddress")
+    )
+    return CreatedFile(file_id=info["id"], owner_emails=owners)
 
 
 def _find_created_file(drive: Any, parent: str, export_id: str) -> str | None:
@@ -125,29 +105,28 @@ def _find_created_file(drive: Any, parent: str, export_id: str) -> str | None:
             return next(iter(matches), None)
 
 
-def _create_file(drive: Any, title: str, parent: str) -> str:
+def _create_file(drive: Any, title: str, parent: str) -> CreatedFile:
     """Create once and recover a lost response by its private export marker."""
     export_id = uuid4().hex
     try:
-        return _execute(
-            drive.files().create(
-                body={
-                    "name": title,
-                    "mimeType": SPREADSHEET_MIME_TYPE,
-                    "parents": [parent],
-                    "appProperties": {EXPORT_ID_PROPERTY: export_id},
-                },
-                supportsAllDrives=True,
-                fields="id",
+        return _file_metadata(
+            _execute(
+                drive.files().create(
+                    body={
+                        "name": title,
+                        "mimeType": SPREADSHEET_MIME_TYPE,
+                        "parents": [parent],
+                        "appProperties": {EXPORT_ID_PROPERTY: export_id},
+                    },
+                    supportsAllDrives=True,
+                    fields="id,owners(emailAddress)",
+                )
             )
-        )["id"]
-    except (HttpError, OSError, HttpLib2Error, TransportError) as ex:
-        if (
-            isinstance(ex, HttpError)
-            and ex.resp.status < 500
-            and ex.resp.status not in {408, 429}
-        ):
+        )
+    except (HttpError, OSError) as ex:
+        if not _is_ambiguous(ex):
             raise
+        time.sleep(0.5)
         logger.warning(
             "Reconciling uncertain spreadsheet creation for export %s", export_id
         )
@@ -157,7 +136,7 @@ def _create_file(drive: Any, title: str, parent: str) -> str:
         except Exception:
             logger.exception("Couldn't look up spreadsheet for export %s", export_id)
         if recovered_id is not None:
-            return recovered_id
+            return CreatedFile(file_id=recovered_id, owner_emails=())
         # Search visibility is not proof that creation failed; never create again.
         logger.error("Spreadsheet creation unresolved; export marker %s", export_id)
         raise
@@ -171,40 +150,42 @@ def _size(rows: list[list[CellValue]]) -> int:
     return len(json.dumps(rows))
 
 
-def _pieces(tabs: list[Tab]) -> list[tuple[dict[str, Any], int]]:
-    """Value ranges paired with their JSON size; oversize tabs are cut into row slices."""
-    pieces: list[tuple[dict[str, Any], int]] = []
-    for tab in tabs:
-        if not tab.rows:
-            continue
-        start = 0
-        chunk: list[list[CellValue]] = []
-        chunk_size = 0
-        for row_number, row in enumerate(tab.rows):
-            row_size = _size([row])
-            if chunk and chunk_size + row_size > MAX_WRITE_BYTES:
-                pieces.append((_range(tab.name, start, chunk), chunk_size))
-                start, chunk, chunk_size = row_number, [], 0
-            chunk.append(row)
-            chunk_size += row_size
-        pieces.append((_range(tab.name, start, chunk), chunk_size))
-    return pieces
-
-
-def _range(name: str, start_row: int, rows: list[list[CellValue]]) -> dict[str, Any]:
-    return {"range": f"{_a1_prefix(name)}!A{start_row + 1}", "values": rows}
-
-
 def _value_batches(tabs: list[Tab]) -> list[list[dict[str, Any]]]:
     batches: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_size = 0
-    for piece, size in _pieces(tabs):
-        if current and current_size + size > MAX_WRITE_BYTES:
+    range_name = ""
+    range_start = 0
+    range_rows: list[list[CellValue]] = []
+    range_size = 0
+
+    def append_range() -> None:
+        nonlocal current, current_size, range_rows, range_size
+        if not range_rows:
+            return
+        if current and current_size + range_size > MAX_WRITE_BYTES:
             batches.append(current)
             current, current_size = [], 0
-        current.append(piece)
-        current_size += size
+        current.append(
+            {
+                "range": f"{_a1_prefix(range_name)}!A{range_start + 1}",
+                "values": range_rows,
+            }
+        )
+        current_size += range_size
+        range_rows, range_size = [], 0
+
+    for tab in tabs:
+        for row_number, row in enumerate(tab.rows):
+            row_size = _size([row])
+            if range_rows and range_size + row_size > MAX_WRITE_BYTES:
+                append_range()
+            if not range_rows:
+                range_name = tab.name
+                range_start = row_number
+            range_rows.append(row)
+            range_size += row_size
+        append_range()
     if current:
         batches.append(current)
     return batches
@@ -256,96 +237,72 @@ def _trash(drive: Any, file_id: str) -> None:
         logger.exception("Couldn't trash partial spreadsheet %s", file_id)
 
 
-def _credentials(info: dict[str, Any]) -> Any:
-    if info["type"] == "authorized_user":
-        return user_credentials.Credentials.from_authorized_user_info(
-            info, scopes=USER_SCOPES
-        )
-    return service_account.Credentials.from_service_account_info(
-        info, scopes=SERVICE_ACCOUNT_SCOPES
-    )
-
-
-def _owner_email(drive: Any) -> str | None:
-    reply = _execute(drive.about().get(fields="user(emailAddress)"))
-    return reply.get("user", {}).get("emailAddress")
-
-
 def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
-    file_id: str | None = None
-    drive: Any = None
-    http: GoogleHttp | None = None
+    info: dict[str, Any] | None = None
     try:
         info = credentials_info()
-        credentials = _credentials(info)
-        http = GoogleHttp(credentials)
-        drive = build("drive", "v3", http=http, cache_discovery=False)
-        sheets = build("sheets", "v4", http=http, cache_discovery=False)
+        credentials = auth.credentials(info)
+        with closing(GoogleHttp(credentials, timeout=export_timeout_seconds())) as http:
+            drive = build("drive", "v3", http=http, cache_discovery=False)
+            sheets = build("sheets", "v4", http=http, cache_discovery=False)
 
-        file_id = _create_file(drive, title, folder_id())
-
-        structure = [
-            {
-                "addSheet": {
-                    "properties": {
-                        "title": tab.name,
-                        "gridProperties": {"frozenRowCount": 1},
+            created_file = _create_file(drive, title, folder_id())
+            file_id = created_file.file_id
+            try:
+                sheet_ids = list(range(1, len(tabs) + 1))
+                structure: list[dict[str, Any]] = [
+                    {
+                        "addSheet": {
+                            "properties": {
+                                "sheetId": sheet_id,
+                                "title": tab.name,
+                                "gridProperties": {"frozenRowCount": 1},
+                            }
+                        }
                     }
-                }
-            }
-            for tab in tabs
-        ] + [{"deleteSheet": {"sheetId": DEFAULT_SHEET_ID}}]
-        reply = _execute(
-            sheets.spreadsheets().batchUpdate(
-                spreadsheetId=file_id, body={"requests": structure}
-            )
-        )
-        sheet_ids = [
-            reply["replies"][i]["addSheet"]["properties"]["sheetId"]
-            for i in range(len(tabs))
-        ]
-
-        for data in _value_batches(tabs):
-            _execute(
-                sheets.spreadsheets()
-                .values()
-                .batchUpdate(
-                    spreadsheetId=file_id,
-                    body={"valueInputOption": "RAW", "data": data},
-                ),
-                retry_safe=True,
-            )
-
-        _execute(
-            sheets.spreadsheets().batchUpdate(
-                spreadsheetId=file_id,
-                body={"requests": _format_requests(tabs, sheet_ids)},
-            ),
-            retry_safe=True,
-        )
-
-        owner = _owner_email(drive) if info["type"] == "authorized_user" else None
-        if not (owner and owner.casefold() == share_with.casefold()):
-            _execute(
-                drive.permissions().create(
-                    fileId=file_id,
-                    body={"type": "user", "role": "writer", "emailAddress": share_with},
-                    supportsAllDrives=True,
-                    sendNotificationEmail=True,
+                    for tab, sheet_id in zip(tabs, sheet_ids)
+                ]
+                structure.extend(_format_requests(tabs, sheet_ids))
+                structure.append({"deleteSheet": {"sheetId": DEFAULT_SHEET_ID}})
+                _execute(
+                    sheets.spreadsheets().batchUpdate(
+                        spreadsheetId=file_id, body={"requests": structure}
+                    )
                 )
-            )
+
+                for data in _value_batches(tabs):
+                    _execute(
+                        sheets.spreadsheets()
+                        .values()
+                        .batchUpdate(
+                            spreadsheetId=file_id,
+                            body={"valueInputOption": "RAW", "data": data},
+                        ),
+                        retry_safe=True,
+                    )
+
+                # A personal account already owns the file it created.
+                if not any(
+                    owner.casefold() == share_with.casefold()
+                    for owner in created_file.owner_emails
+                ):
+                    _execute(
+                        drive.permissions().create(
+                            fileId=file_id,
+                            body={
+                                "type": "user",
+                                "role": "writer",
+                                "emailAddress": share_with,
+                            },
+                            supportsAllDrives=True,
+                            sendNotificationEmail=True,
+                        )
+                    )
+            except Exception:
+                _trash(drive, file_id)
+                raise
     except Exception as ex:
-        logger.exception("Google Sheets export failed")
-        if isinstance(ex, RefreshError):
-            logger.error(
-                "Google rejected the GSHEETS_CREDENTIALS token; for a personal account, "
-                "re-run scripts/gsheets_personal_setup.py"
-            )
-        if file_id is not None:
-            _trash(drive, file_id)
+        logger.exception("Google Sheets export failed%s", auth.failure_hint(ex, info))
         raise GoogleExportError() from ex
-    finally:
-        if http is not None:
-            http.close()
 
     return f"https://docs.google.com/spreadsheets/d/{file_id}/edit"

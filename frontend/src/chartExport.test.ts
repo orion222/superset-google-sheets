@@ -1,6 +1,6 @@
 import { toasts } from '@apache-superset/core';
 import { exportChart } from './chartExport';
-import { EXTENSION_BASE } from './client';
+import { err, mockFetch, ok } from '../test/httpMock';
 
 const REQUEST = {
   datasource: { id: 1, type: 'table' },
@@ -8,25 +8,17 @@ const REQUEST = {
   result_type: 'full',
   result_format: 'json',
 };
-const fetchMock = jest.fn();
-global.fetch = fetchMock as unknown as typeof fetch;
-
-const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
-const err = (status: number, body: unknown) => ({
-  ok: false,
-  status,
-  json: async () => body,
-});
+const fetchMock = mockFetch();
 
 beforeEach(() => {
   jest.clearAllMocks();
 });
 
 test('posts the payload and shows a success toast with the link', async () => {
-  fetchMock.mockResolvedValue(ok({ url: 'https://docs.google.com/spreadsheets/d/f/edit' }));
+  fetchMock.mockResolvedValue(ok({ spreadsheet_url: 'https://docs.google.com/spreadsheets/d/f/edit' }));
   await exportChart({ getPayload: async () => REQUEST, chartName: 'Sales', canDownload: true });
   expect(fetchMock).toHaveBeenCalledWith(
-    `${EXTENSION_BASE}/chart/`,
+    '/extensions/michael-s-molina/sqllab-gsheets/chart/',
     expect.objectContaining({
       method: 'POST',
       body: JSON.stringify({ payload: REQUEST, chartName: 'Sales' }),
@@ -41,9 +33,10 @@ test('posts the payload and shows a success toast with the link', async () => {
 });
 
 test('posts chartId from the context', async () => {
-  fetchMock.mockResolvedValue(ok({ url: 'u' }));
+  fetchMock.mockResolvedValue(ok({ spreadsheet_url: 'u' }));
   await exportChart({ getPayload: async () => REQUEST, chartName: 'Sales', chartId: 59, canDownload: true });
-  expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+  const requestBody = fetchMock.mock.calls[0]?.[1]?.body;
+  expect(JSON.parse(requestBody as string)).toEqual({
     payload: REQUEST,
     chartName: 'Sales',
     chartId: 59,
@@ -51,18 +44,23 @@ test('posts chartId from the context', async () => {
 });
 
 test('omits chartId when the context has none', async () => {
-  fetchMock.mockResolvedValue(ok({ url: 'u' }));
+  fetchMock.mockResolvedValue(ok({ spreadsheet_url: 'u' }));
   await exportChart({ getPayload: async () => REQUEST, chartName: 'Sales', canDownload: true });
-  expect(JSON.parse(fetchMock.mock.calls[0][1].body)).not.toHaveProperty('chartId');
+  const requestBody = fetchMock.mock.calls[0]?.[1]?.body;
+  expect(JSON.parse(requestBody as string)).not.toHaveProperty('chartId');
 });
 
 test('pivoted export overrides result_type', async () => {
-  fetchMock.mockResolvedValue(ok({ url: 'u' }));
+  fetchMock.mockResolvedValue(ok({ spreadsheet_url: 'u' }));
+  const payload = { ...REQUEST };
   await exportChart(
-    { getPayload: async () => ({ ...REQUEST }), chartName: 'P', canDownload: true },
+    { getPayload: async () => payload, chartName: 'P', canDownload: true },
     'post_processed',
   );
-  expect(JSON.parse(fetchMock.mock.calls[0][1].body).payload.result_type).toBe('post_processed');
+  const requestBody = fetchMock.mock.calls[0]?.[1]?.body;
+  expect(typeof requestBody).toBe('string');
+  expect(JSON.parse(requestBody as string).payload.result_type).toBe('post_processed');
+  expect(payload.result_type).toBe('full');
 });
 
 test('server message shown as a danger toast and the pending toast dismissed', async () => {
