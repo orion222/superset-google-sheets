@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from google.auth.exceptions import RefreshError, TransportError
 from google.oauth2 import credentials as user_credentials
@@ -57,7 +57,7 @@ class GoogleExportError(Exception):
         super().__init__("Couldn't create the Google Sheet. Try again later.")
 
 
-def tab_label(chart_id: int | None, chart_name: str, index: int) -> str:
+def tab_label(chart_id: int | UUID | None, chart_name: str, index: int) -> str:
     # Drill By sends slice_id 0, so a falsy ID means the chart has no identity.
     if not chart_id:
         return chart_name if index == 0 else f"{chart_name} ({index})"

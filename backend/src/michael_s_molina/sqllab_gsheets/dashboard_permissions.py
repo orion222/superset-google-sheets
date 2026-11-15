@@ -20,15 +20,30 @@
 from __future__ import annotations
 
 from typing import Any, cast
+from uuid import UUID
 
 from flask import current_app
+from superset_core.common.daos import DashboardDAO
 from superset_core.exports.export import can_export_dashboard, can_export_data
 
 from .errors import is_named_exception
 
 
+def resolve_dashboard_uuid(dashboard_id: int) -> UUID | None:
+    """Resolve a numeric menu or legacy task ID through the public dashboard DAO."""
+    if isinstance(dashboard_id, bool) or dashboard_id <= 0:
+        return None
+    dashboard = DashboardDAO.find_one_or_none(id=dashboard_id)
+    if dashboard is None or dashboard.uuid is None:
+        return None
+    try:
+        return UUID(str(dashboard.uuid))
+    except ValueError:
+        return None
+
+
 def dashboard_export_allowed(
-    email: str | None, dashboard_id: int | None = None
+    email: str | None, dashboard_id: UUID | None = None
 ) -> bool:
     """Check the current Superset user, including dashboard access when known."""
     sm = cast(Any, current_app).appbuilder.sm

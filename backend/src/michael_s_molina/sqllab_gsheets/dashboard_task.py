@@ -20,10 +20,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Event
 from typing import Any
+from uuid import UUID
 
 from flask import g
 from superset_core.exports.export import (
@@ -39,7 +40,7 @@ from superset_core.tasks.types import TaskScope
 from .about_tab import ABOUT_COLUMNS, ExportedTab, SkippedChart, build_about_tab
 from .cells import query_rows, temporal_columns
 from .config import DEFAULT_EXPORT_TIMEOUT_SECONDS
-from .dashboard_permissions import dashboard_export_allowed
+from .dashboard_permissions import dashboard_export_allowed, resolve_dashboard_uuid
 from .google_sheets import (
     MAX_CELLS,
     Tab,
@@ -87,12 +88,26 @@ def _skip_reason(reason: SkipReason) -> str:
     return CHART_FAILED
 
 
-def _require_access(dashboard_id: int) -> str:
+def _require_access(dashboard_id: UUID) -> str:
     """Recheck queued work against the requesting user's effective grants."""
     email = getattr(g.user, "email", None)
     if not dashboard_export_allowed(email, dashboard_id):
         raise DashboardExportError(ACCESS_DENIED)
     return str(email)
+
+
+def _task_dashboard_uuid(dashboard_id: str | int) -> UUID:
+    """Decode UUID task arguments or resolve numeric IDs from legacy tasks."""
+    if isinstance(dashboard_id, int):
+        dashboard_uuid = resolve_dashboard_uuid(dashboard_id)
+        if dashboard_uuid is not None:
+            return dashboard_uuid
+    elif isinstance(dashboard_id, str):
+        try:
+            return UUID(dashboard_id)
+        except ValueError:
+            pass
+    raise DashboardExportError(ACCESS_DENIED)
 
 
 def _classify(
@@ -156,7 +171,7 @@ def _check_between_charts(
     timeout=DEFAULT_EXPORT_TIMEOUT_SECONDS,
 )
 def run_dashboard_export(
-    dashboard_id: int, active_data_mask: dict[str, Any], user_id: int
+    dashboard_id: str | int, active_data_mask: dict[str, Any], user_id: int
 ) -> None:
     """Query as the requester, skip failed charts, then publish one Google Sheet URL."""
     context = get_context()
@@ -171,8 +186,9 @@ def run_dashboard_export(
     try:
         with as_user(user_id):
             check_abort()
-            email = _require_access(dashboard_id)
-            info = describe_dashboard_export(dashboard_id, active_data_mask)
+            dashboard_uuid = _task_dashboard_uuid(dashboard_id)
+            email = _require_access(dashboard_uuid)
+            info = describe_dashboard_export(dashboard_uuid, active_data_mask)
             check_abort()
             exported_at = datetime.now(timezone.utc)
             charts: list[_ChartTabs] = []
@@ -184,7 +200,9 @@ def run_dashboard_export(
             remaining = MAX_CELLS - tab_cells(about_base) - chart_count * ABOUT_COLUMNS
             if remaining < 0:
                 raise DashboardExportError(METADATA_LIMIT)
-            results = iter(iter_dashboard_chart_results(dashboard_id, active_data_mask))
+            results = iter(
+                iter_dashboard_chart_results(dashboard_uuid, active_data_mask)
+            )
             for processed, chart in enumerate(
                 _check_between_charts(results, check_abort), 1
             ):
@@ -209,7 +227,7 @@ def run_dashboard_export(
             if not charts:
                 raise DashboardExportError(NO_CHARTS)
             check_abort()
-            email = _require_access(dashboard_id)
+            email = _require_access(dashboard_uuid)
             about = build_about_tab(
                 info,
                 exported_at,
@@ -231,7 +249,7 @@ def run_dashboard_export(
                     "url": url,
                     "exported_charts": len(charts),
                     "exported_tabs": sum(len(chart.tabs) for chart in charts),
-                    "skipped_charts": [asdict(chart) for chart in skipped],
+                    "skipped_charts": [chart.to_payload() for chart in skipped],
                 },
                 immediate=True,
             )
@@ -246,7 +264,7 @@ def run_dashboard_export(
         context.update_task(
             payload={
                 "error_message": message,
-                "skipped_charts": [asdict(chart) for chart in skipped],
+                "skipped_charts": [chart.to_payload() for chart in skipped],
             },
             immediate=True,
         )

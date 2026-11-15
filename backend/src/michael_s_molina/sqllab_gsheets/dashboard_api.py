@@ -29,7 +29,7 @@ from superset_core.rest_api.decorators import api
 from superset_core.tasks.types import TaskOptions
 
 from .config import background_tasks_enabled, export_timeout_seconds
-from .dashboard_permissions import dashboard_export_allowed
+from .dashboard_permissions import dashboard_export_allowed, resolve_dashboard_uuid
 from .dashboard_task import run_dashboard_export
 from .errors import GENERIC_FAILURE, INVALID_REQUEST, ExportRejected, is_named_exception
 from .filter_hash import dashboard_export_key, snapshot_filters
@@ -49,7 +49,7 @@ class _DashboardScheduler(Protocol):
 
     def schedule(
         self,
-        dashboard_id: int,
+        dashboard_id: str,
         active_data_mask: dict[str, Any],
         user_id: int,
         *,
@@ -89,14 +89,15 @@ def start_dashboard_export(
     ):
         raise ExportRejected(400, INVALID_REQUEST)
     active_data_mask = snapshot_filters(body.get("activeDataMask", {}))
-    if not dashboard_export_allowed(email, dashboard_id):
+    dashboard_uuid = resolve_dashboard_uuid(dashboard_id)
+    if dashboard_uuid is None or not dashboard_export_allowed(email, dashboard_uuid):
         raise ExportRejected(403, PERMISSION_DENIED)
     task = cast(_DashboardScheduler, run_dashboard_export).schedule(
-        dashboard_id,
+        str(dashboard_uuid),
         active_data_mask,
         user_id,
         options=TaskOptions(
-            task_key=dashboard_export_key(dashboard_id, active_data_mask, user_id),
+            task_key=dashboard_export_key(dashboard_uuid, active_data_mask, user_id),
             task_name="Export dashboard to Google Sheets",
             timeout=export_timeout_seconds(),
         ),

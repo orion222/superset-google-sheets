@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from uuid import UUID
 
 from superset_core.exports.types import DashboardExportInfo
 
@@ -43,9 +44,17 @@ class ExportedTab:
 class SkippedChart:
     """A chart omitted from the export, with a consumer-safe reason."""
 
-    chart_id: int
+    chart_id: UUID
     chart_name: str
     reason: str
+
+    def to_payload(self) -> dict[str, str]:
+        """Represent skipped-chart metadata using JSON-compatible identifiers."""
+        return {
+            "chart_id": str(self.chart_id),
+            "chart_name": self.chart_name,
+            "reason": self.reason,
+        }
 
 
 def build_about_tab(

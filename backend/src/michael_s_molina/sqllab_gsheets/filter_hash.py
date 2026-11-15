@@ -22,8 +22,9 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Any
+from uuid import UUID
 
-from .errors import ExportRejected, INVALID_REQUEST
+from .errors import INVALID_REQUEST, ExportRejected
 
 
 def snapshot_filters(value: Any) -> dict[str, Any]:
@@ -48,7 +49,7 @@ def snapshot_filters(value: Any) -> dict[str, Any]:
 
 
 def dashboard_export_key(
-    dashboard_id: int, active_data_mask: dict[str, Any], user_id: int
+    dashboard_id: UUID, active_data_mask: dict[str, Any], user_id: int
 ) -> str:
     """Hash the requester, dashboard and query-relevant filter values."""
     effective = {}
@@ -61,7 +62,7 @@ def dashboard_export_key(
             )
         effective[key] = filtered
     encoded = json.dumps(
-        ["gsheets-dashboard-v1", user_id, dashboard_id, effective],
+        ["gsheets-dashboard-v2", user_id, str(dashboard_id), effective],
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
