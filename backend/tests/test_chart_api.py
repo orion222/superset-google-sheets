@@ -22,9 +22,9 @@ PAYLOAD = {"form_data": {}}
 ONE = [ChartQueryResult(["a"], [GenericDataType.NUMERIC], [{"a": 1}])]
 
 
-def export_chart(payload, chart_name, email, now):
+def export_chart(payload, chart_name, email, now, chart_id=None):
     request = chart_api.ChartExportRequest.parse(
-        {"payload": payload, "chartName": chart_name}
+        {"payload": payload, "chartName": chart_name, "chartId": chart_id}
     )
     return chart_api.export_chart(request, email, now)
 
@@ -68,6 +68,26 @@ def test_exports_and_titles(app, m):
 
 def test_drill_by_slice_id_zero_has_no_id_prefix(app, m):
     export_chart({"form_data": {"slice_id": 0}}, "Sales", "u@x.com", NOW)
+    assert [t.name for t in m.create_spreadsheet.call_args.args[1]] == ["Sales"]
+
+
+def test_chart_id_prefixes_drill_tabs(app, m):
+    export_chart({"form_data": {"slice_id": 0}}, "Sales", "u@x.com", NOW, chart_id=59)
+    assert [t.name for t in m.create_spreadsheet.call_args.args[1]] == ["59 - Sales"]
+
+
+def test_chart_id_precedes_form_data_slice_id(app, m):
+    export_chart(
+        {"form_data": {"slice_id": 7}}, "Sales", "u@x.com", NOW, chart_id=59
+    )
+    assert [t.name for t in m.create_spreadsheet.call_args.args[1]] == ["59 - Sales"]
+
+
+@pytest.mark.parametrize("chart_id", ["59", True, -1, 0, 0.5])
+def test_invalid_chart_id_is_ignored(app, m, chart_id):
+    export_chart(
+        {"form_data": {"slice_id": 0}}, "Sales", "u@x.com", NOW, chart_id=chart_id
+    )
     assert [t.name for t in m.create_spreadsheet.call_args.args[1]] == ["Sales"]
 
 
@@ -211,6 +231,28 @@ def test_endpoint_malformed_body_is_400(app, kwargs):
     ):
         assert endpoint(api) == (400, {"message": "Invalid export request."})
     export.assert_not_called()
+
+
+def test_endpoint_uses_chart_id_for_tab_name(app, m):
+    api = GSheetsExportAPI()
+    api.response = lambda status, **kw: (status, kw)
+    endpoint = inspect.unwrap(GSheetsExportAPI.export_chart_to_sheets)
+    with (
+        app.test_request_context(
+            method="POST",
+            json={
+                "payload": {"form_data": {"slice_id": 7}},
+                "chartName": "Sales",
+                "chartId": 59,
+            },
+        ),
+        patch(f"{API_MODULE}.g", MagicMock(user=MagicMock(email="u@x.com"))),
+    ):
+        assert endpoint(api) == (
+            200,
+            {"spreadsheet_url": "https://docs.google.com/spreadsheets/d/f/edit"},
+        )
+    assert [t.name for t in m.create_spreadsheet.call_args.args[1]] == ["59 - Sales"]
 
 
 def test_google_failure_is_generic_500(app, m):

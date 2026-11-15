@@ -17,6 +17,7 @@ export async function exportChart(
     const data = await postJson<{ spreadsheet_url: string }>('/chart/', {
       payload,
       chartName: ctx.chartName,
+      chartId: ctx.chartId,
     });
     return { ...data, message: 'Sent to Google Sheets' };
   });

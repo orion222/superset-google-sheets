@@ -32,10 +32,18 @@ ROW_RESULT_TYPES = frozenset(
 )
 
 
+def _chart_id(value: Any) -> int | None:
+    # Chart IDs only label tabs, so unusable values have no identity.
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
 @dataclass(frozen=True)
 class ChartExportRequest:
     payload: dict[str, Any]
     chart_name: str | None
+    chart_id: int | None = None
 
     @classmethod
     def parse(cls, body: Any) -> ChartExportRequest:
@@ -76,7 +84,11 @@ class ChartExportRequest:
             for result_type in result_types
         ):
             raise ExportRejected(400, INVALID_REQUEST)
-        return cls(payload=payload, chart_name=chart_name)
+        return cls(
+            payload=payload,
+            chart_name=chart_name,
+            chart_id=_chart_id(body.get("chartId")),
+        )
 
 
 def capabilities(email: str | None) -> dict[str, bool]:
@@ -110,7 +122,8 @@ def _tabs(
     chart_request: ChartExportRequest, name: str, results: list[ChartQueryResult]
 ) -> list[Tab]:
     used: set[str] = set()
-    chart_id = _chart_id_from_payload(chart_request.payload)
+    # Drill surfaces send no `slice_id`, or `0`, so the host's chart ID comes first.
+    chart_id = chart_request.chart_id or _chart_id_from_payload(chart_request.payload)
     return [
         Tab(
             build_tab_name(
@@ -165,6 +178,7 @@ def export_chart(
     chart_request: ChartExportRequest,
     email: str | None,
     now: datetime,
+    chart_id: Any = None,
 ) -> str:
     email = require_exporter(email)
 
