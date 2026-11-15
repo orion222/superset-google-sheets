@@ -46,6 +46,8 @@ Who sees the items:
 
 Open the dashboard's main **Download** menu and choose **Export to Google Sheets**. The export runs in a background task, and a completion toast provides the spreadsheet link. The sheet contains chart query data in dashboard layout order, with one tab per query and an **About** tab containing the dashboard permalink, export time, applied native filters, chart links and skipped-chart reasons.
 
+Dashboard chart tabs are prefixed with the chart UUID, followed by its name. Dashboard export requires the UUID-based `superset_core.exports` API introduced by Superset commit `bf3e27d3a0`. The extension resolves numeric dashboard menu IDs through the public Dashboard DAO before calling that API.
+
 The active native filters are copied when the export starts. Each filter retains its chart scope, and cleared filters stay cleared. Superset's dashboard export API applies native filters; cross-filters are excluded. Queries run as the requesting Superset user, with access and row-level security checked in the worker. Data comes from saved dashboard charts; results retain the host export API's query limits.
 
 Repeated clicks with the same user, dashboard and filter values join the running task. Different filter values start a separate export. After a task finishes, another click starts a new export. Browser polling starts every five seconds, slows to 15 seconds after one minute and 30 seconds after five minutes, backs off after transient failures, and pauses while the browser tab is hidden. After 30 minutes, the browser stops waiting and directs the user to the task list. Closing the page also stops browser polling; the task remains available in Superset's task list.
@@ -62,6 +64,8 @@ GSHEETS_EXPORT_TIMEOUT_SECONDS = 900
 ```
 
 Configure the broker, result/cache backend and Celery worker according to [Superset's task documentation](https://superset.apache.org/developer_portal/extensions/tasks). Install the same extension bundle and Google credentials/folder configuration on both the web server and worker, then restart both. The dashboard command is hidden when the task feature is disabled; enabling the feature does not verify that a worker is online.
+
+When upgrading from integer-based dashboard exports, deploy the updated extension to workers before the web server. Updated workers accept both legacy numeric task arguments and UUID strings. New exports use UUID-based deduplication keys, so they do not join tasks submitted with the previous keys.
 
 Users need the extension and data export permissions below, dashboard export permission and access to that dashboard, plus `can read on Task` to observe the result. The worker rechecks the user's export and dashboard permissions before reading data. Tasks are private to the requester.
 
