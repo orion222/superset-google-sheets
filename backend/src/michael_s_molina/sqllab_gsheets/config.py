@@ -56,7 +56,14 @@ def export_timeout_seconds() -> float:
 
 
 def sql_lab_max_rows() -> int:
-    """Keep the SQL Lab row-cap import available while its logic lives with the API."""
-    from .api import sql_lab_max_rows as api_sql_lab_max_rows
-
-    return api_sql_lab_max_rows()
+    """Most rows a SQL Lab export takes; kept below SQL_MAX_ROW so truncation shows."""
+    cap = sync_max_rows()
+    sql_max_row = current_app.config.get("SQL_MAX_ROW")
+    if (
+        isinstance(sql_max_row, (int, float))
+        and not isinstance(sql_max_row, bool)
+        and math.isfinite(sql_max_row)
+        and int(sql_max_row) > 0
+    ):
+        cap = min(cap, int(sql_max_row) - 1)
+    return cap

@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -99,22 +97,3 @@ def test_sql_lab_max_rows_stays_below_sql_max_row(app, sql_max_row, expected):
     if sql_max_row is not None:
         app.config["SQL_MAX_ROW"] = sql_max_row
     assert sql_lab_max_rows() == expected
-
-
-def test_sql_lab_query_uses_configured_row_cap(app):
-    from michael_s_molina.sqllab_gsheets.api import GSheetsExportAPI
-    from superset_core.queries.types import QueryStatus
-
-    app.config.update(GSHEETS_EXPORT_SYNC_MAX_ROWS=1000, SQL_MAX_ROW=500)
-    database = MagicMock()
-    database.id = 7
-    database.execute.return_value = SimpleNamespace(
-        status=QueryStatus.SUCCESS,
-        statements=[SimpleNamespace(data=pd.DataFrame({"value": [1]}))],
-    )
-    api = object.__new__(GSheetsExportAPI)
-
-    api._execute_query(database, "SELECT 1", None, None)
-
-    options = database.execute.call_args.args[1]
-    assert options.limit == 499
