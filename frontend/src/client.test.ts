@@ -98,6 +98,63 @@ test('SQL Lab exports use the configured application path', async () => {
   );
 });
 
+test('POST captures filter values before awaiting the CSRF token', async () => {
+  const { client, authentication } = await loadClient();
+  let resolveToken!: (token: string) => void;
+  jest
+    .mocked(authentication.getCSRFToken)
+    .mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          resolveToken = resolve;
+        }),
+    );
+  const values = ['CA'];
+  const posting = client.postJson('/dashboard/', {
+    dashboardId: 42,
+    activeDataMask: { 'NATIVE_FILTER-1': { filterState: { value: values } } },
+  });
+  values[0] = 'US';
+  expect(fetchMock).not.toHaveBeenCalled();
+  resolveToken('async-token');
+  await posting;
+
+  expect(fetchMock).toHaveBeenCalledWith(
+    '/extensions/michael-s-molina/sqllab-gsheets/dashboard/',
+    expect.objectContaining({
+      body: JSON.stringify({
+        dashboardId: 42,
+        activeDataMask: { 'NATIVE_FILTER-1': { filterState: { value: ['CA'] } } },
+      }),
+    }),
+  );
+});
+
+test('host API reads use the application path without the extension base', async () => {
+  setBootstrap({ common: { application_root: '/superset' } });
+  const { client } = await loadClient();
+  await client.getHostJson('/api/v1/task/task-id');
+  expect(fetchMock).toHaveBeenLastCalledWith('/superset/api/v1/task/task-id', {
+    method: 'GET',
+  });
+});
+
+test('GET lets the browser cancel an in-flight request', async () => {
+  const { client } = await loadClient();
+  fetchMock.mockImplementationOnce(
+    (_input, options) =>
+      new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('Request aborted', 'AbortError'));
+        });
+      }),
+  );
+  const controller = new AbortController();
+  const getting = client.getHostJson('/api/v1/task/task-id', controller.signal);
+  controller.abort();
+  await expect(getting).rejects.toMatchObject({ name: 'AbortError' });
+});
+
 test('a missing bootstrap keeps root deployment URLs', async () => {
   const { client } = await loadClient();
   await client.getJson('/chart/capabilities');

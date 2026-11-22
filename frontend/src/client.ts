@@ -46,6 +46,7 @@ export class ApiError extends Error {
 
   constructor(message: string, status: number) {
     super(message);
+    Object.setPrototypeOf(this, new.target.prototype);
     this.name = 'ApiError';
     this.status = status;
   }
@@ -69,6 +70,8 @@ async function parse<T>(response: Response): Promise<T> {
 }
 
 export async function postJson<T>(path: `/${string}`, body: unknown): Promise<T> {
+  // Serialize before awaiting the token so later caller mutations can't change the request.
+  const payload = JSON.stringify(body);
   const csrfToken = await authentication.getCSRFToken();
   const response = await fetch(extensionUrl(path), {
     method: 'POST',
@@ -76,12 +79,30 @@ export async function postJson<T>(path: `/${string}`, body: unknown): Promise<T>
       'Content-Type': 'application/json',
       'X-CSRFToken': csrfToken ?? '',
     },
-    body: JSON.stringify(body),
+    body: payload,
   });
   return parse<T>(response);
 }
 
-export async function getJson<T>(path: `/${string}`): Promise<T> {
-  const response = await fetch(extensionUrl(path), { method: 'GET' });
+async function getUrl<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(url, {
+    method: 'GET',
+    ...(signal && { signal }),
+  });
   return parse<T>(response);
+}
+
+export async function getJson<T>(
+  path: `/${string}`,
+  signal?: AbortSignal,
+): Promise<T> {
+  return getUrl<T>(extensionUrl(path), signal);
+}
+
+// Superset's own REST API, such as task status, under the configured application path.
+export async function getHostJson<T>(
+  path: `/api/${string}`,
+  signal?: AbortSignal,
+): Promise<T> {
+  return getUrl<T>(`${applicationRoot()}${path}`, signal);
 }

@@ -1,7 +1,11 @@
 import { sqlLab, commands, menus, toasts } from '@apache-superset/core';
-import type { ChartDownloadContext } from '@apache-superset/core';
+import type {
+  ChartDownloadContext,
+  DashboardDownloadContext,
+} from '@apache-superset/core';
 import { exportChart } from './chartExport';
 import { postJson } from './client';
+import { exportDashboard } from './dashboardExport';
 import { runExport } from './exportFlow';
 import { registerIfCapable } from './registration';
 
@@ -17,12 +21,16 @@ async function exportSqlLab(): Promise<void> {
   const sql = editor.getValue()?.trim();
 
   if (!sql) {
-    toasts.addWarningToast('No SQL query to export. Please write a query first.');
+    toasts.addWarningToast(
+      'No SQL query to export. Please write a query first.',
+    );
     return;
   }
 
   if (!currentTab.databaseId) {
-    toasts.addWarningToast('No database selected. Please select a database first.');
+    toasts.addWarningToast(
+      'No database selected. Please select a database first.',
+    );
     return;
   }
 
@@ -136,3 +144,22 @@ function register(): void {
 
 // Users without the extension permission get a 403 here and see none of the items.
 void registerIfCapable('/chart/capabilities', register);
+
+function registerDashboard(): void {
+  commands.registerCommand(
+    {
+      id: 'sqllab_gsheets.exportDashboard',
+      title: 'Export to Google Sheets',
+      description: 'Export dashboard data to Google Sheets',
+    },
+    (ctx: DashboardDownloadContext) => exportDashboard(ctx),
+  );
+  menus.registerMenuItem(
+    { view: 'dashboard.download', command: 'sqllab_gsheets.exportDashboard' },
+    'dashboard.download',
+    'primary',
+  );
+}
+
+// Dashboard exports additionally require the asynchronous task infrastructure.
+void registerIfCapable('/dashboard/capabilities', registerDashboard);

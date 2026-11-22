@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Generic, ParamSpec
 from unittest.mock import MagicMock, patch
 
 import httplib2
 import pytest
 import superset_core.exports.export as _export
 import superset_core.rest_api.decorators as _decorators
+import superset_core.tasks.decorators as _task_decorators
 from flask import Flask
 from googleapiclient.errors import HttpError
 from googleapiclient.http import _should_retry_response
+from superset_core.tasks.types import TaskScope
 
 
 # Outside a running Superset the real decorator raises NotImplementedError; this must
@@ -19,7 +22,57 @@ def _passthrough_api(**_kwargs):
     return lambda cls: cls
 
 
-_decorators.api = _passthrough_api
+setattr(_decorators, "api", _passthrough_api)
+
+P = ParamSpec("P")
+_original_task = _task_decorators.task
+_task_schedules: list[MagicMock] = []
+
+
+class _TaskStub(Generic[P]):
+    """Call the worker directly while keeping asynchronous scheduling isolated."""
+
+    def __init__(
+        self,
+        function: Callable[P, object],
+        name: str | None,
+        scope: TaskScope,
+        timeout: int | None,
+    ) -> None:
+        self.__wrapped__ = function
+        self.name = name or function.__name__
+        self.scope = scope
+        self.timeout = timeout
+        self.schedule = MagicMock(name=f"{self.name}.schedule")
+        _task_schedules.append(self.schedule)
+
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> object:
+        return self.__wrapped__(*args, **kwargs)
+
+
+def _passthrough_task(
+    name: str | None = None,
+    scope: TaskScope = TaskScope.PRIVATE,
+    timeout: int | None = None,
+    subscription_policy: object | None = None,
+) -> Callable[[Callable[P, object]], _TaskStub[P]]:
+    """Replace the host-injected decorator during standalone extension tests."""
+    return lambda function: _TaskStub(function, name, scope, timeout)
+
+
+setattr(_task_decorators, "task", _passthrough_task)
+
+
+@pytest.fixture(autouse=True)
+def _reset_task_scheduling() -> None:
+    """A task's mock scheduling state must not depend on test order."""
+    for schedule in _task_schedules:
+        schedule.reset_mock(return_value=True, side_effect=True)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Restore the public decorator when the standalone test session ends."""
+    setattr(_task_decorators, "task", _original_task)
 
 
 def _build_tab_name(raw: str, used: set[str], max_len: int) -> str:
@@ -118,8 +171,10 @@ class FakeGoogle:
             "permissions.create", {}
         )
         spreadsheets = self.sheets.spreadsheets()
-        spreadsheets.batchUpdate.side_effect = lambda spreadsheetId, body: self._request(
-            "batchUpdate", self._batch_reply(body)
+        spreadsheets.batchUpdate.side_effect = (
+            lambda spreadsheetId, body: self._request(
+                "batchUpdate", self._batch_reply(body)
+            )
         )
         spreadsheets.values().batchUpdate.side_effect = lambda **_: self._request(
             "values.batchUpdate", {}
@@ -146,7 +201,9 @@ def google():
     with (
         patch(
             f"{module}.build",
-            side_effect=lambda name, *_, **__: fake.drive if name == "drive" else fake.sheets,
+            side_effect=lambda name, *_, **__: fake.drive
+            if name == "drive"
+            else fake.sheets,
         ),
         patch(
             f"{module}.auth.service_account.Credentials.from_service_account_info"
