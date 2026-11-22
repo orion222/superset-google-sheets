@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import httplib2
 import pytest
+import superset_core.exports.export as _export
 import superset_core.rest_api.decorators as _decorators
 from flask import Flask
 from googleapiclient.errors import HttpError
@@ -19,6 +20,28 @@ def _passthrough_api(**_kwargs):
 
 
 _decorators.api = _passthrough_api
+
+
+def _build_tab_name(raw: str, used: set[str], max_len: int) -> str:
+    """Mirror the host's non-Excel sanitize_sheet_name, which Superset injects at startup."""
+    if max_len < 4:
+        raise ValueError(f"max_len must be at least 4, got {max_len}")
+    name = (raw or "").strip().strip("'").strip() or "Sheet"
+    name = name[:max_len]
+    suffix = 1
+    candidate = name
+    while candidate.lower() in used:
+        suffix += 1
+        marker = f"~{suffix}"
+        if len(marker) > max_len:
+            raise ValueError(f"No unique sheet name fits in {max_len} characters")
+        candidate = name[: max_len - len(marker)] + marker
+    used.add(candidate.lower())
+    return candidate
+
+
+# Modules bind this name at import, so it must be replaced before they load.
+_export.build_tab_name = _build_tab_name
 
 
 @pytest.fixture
