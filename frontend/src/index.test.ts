@@ -6,6 +6,15 @@ type CoreModule = Pick<typeof Core, 'commands' | 'menus' | 'sqlLab' | 'toasts'>;
 const fetchMock = mockFetch();
 const flushPromises = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 
+// Capability checks resolve in any order, so responses are chosen by URL.
+function mockSqlLabExport(exportBody: unknown): void {
+  fetchMock.mockImplementation(input =>
+    Promise.resolve(
+      ok(String(input).endsWith('/export/') ? exportBody : { can_export: true }),
+    ),
+  );
+}
+
 // Each isolated registry gets its own mock instance, so the spies are read from inside it.
 async function loadExtension(): Promise<CoreModule> {
   let core!: CoreModule;
@@ -49,7 +58,13 @@ test('registers nothing when can_export is false', async () => {
 });
 
 test('registers chart items at every chart location, both pivoted locations to the pivoted command', async () => {
-  fetchMock.mockResolvedValue(ok({ can_export: true }));
+  fetchMock.mockImplementation(input =>
+    Promise.resolve(
+      ok({
+        can_export: !String(input).endsWith('/dashboard/capabilities'),
+      }),
+    ),
+  );
   const { commands, menus } = await loadExtension();
   const calls = (menus.registerMenuItem as jest.Mock).mock.calls.map(
     ([item, loc, group]) => [loc, item.command, group],
@@ -57,17 +72,27 @@ test('registers chart items at every chart location, both pivoted locations to t
   expect(calls).toEqual(
     expect.arrayContaining([
       ['explore.chart.download', 'sqllab_gsheets.exportChart', 'primary'],
-      ['explore.chart.download.pivoted', 'sqllab_gsheets.exportChartPivoted', 'primary'],
+      [
+        'explore.chart.download.pivoted',
+        'sqllab_gsheets.exportChartPivoted',
+        'primary',
+      ],
       ['explore.standalone.download', 'sqllab_gsheets.exportChart', 'primary'],
       ['dashboard.chart.download', 'sqllab_gsheets.exportChart', 'primary'],
-      ['dashboard.chart.download.pivoted', 'sqllab_gsheets.exportChartPivoted', 'primary'],
+      [
+        'dashboard.chart.download.pivoted',
+        'sqllab_gsheets.exportChartPivoted',
+        'primary',
+      ],
       ['chart.drillDetail.download', 'sqllab_gsheets.exportChart', 'primary'],
       ['chart.drillBy.download', 'sqllab_gsheets.exportChart', 'primary'],
       ['sqllab.editor', 'sqllab_gsheets.export', 'secondary'],
     ]),
   );
   expect(calls).toHaveLength(8);
-  const ids = (commands.registerCommand as jest.Mock).mock.calls.map(([c]) => c.id);
+  const ids = (commands.registerCommand as jest.Mock).mock.calls.map(
+    ([c]) => c.id,
+  );
   expect(ids.sort()).toEqual([
     'sqllab_gsheets.export',
     'sqllab_gsheets.exportChart',
@@ -76,9 +101,7 @@ test('registers chart items at every chart location, both pivoted locations to t
 });
 
 test('SQL Lab export reports a missing spreadsheet URL as a failure', async () => {
-  fetchMock
-    .mockResolvedValueOnce(ok({ can_export: true }))
-    .mockResolvedValueOnce(ok({ row_count: 3 }));
+  mockSqlLabExport({ row_count: 3 });
   const core = await loadExtension();
   (core.sqlLab.getCurrentTab as jest.Mock).mockReturnValue({
     getEditor: async () => ({ getValue: () => 'SELECT 1' }),
@@ -96,11 +119,10 @@ test('SQL Lab export reports a missing spreadsheet URL as a failure', async () =
 });
 
 test('SQL Lab export shows the row count and spreadsheet link', async () => {
-  fetchMock
-    .mockResolvedValueOnce(ok({ can_export: true }))
-    .mockResolvedValueOnce(
-      ok({ spreadsheet_url: 'https://docs.google.com/spreadsheets/d/sql/edit', row_count: 3 }),
-    );
+  mockSqlLabExport({
+    spreadsheet_url: 'https://docs.google.com/spreadsheets/d/sql/edit',
+    row_count: 3,
+  });
   const core = await loadExtension();
   (core.sqlLab.getCurrentTab as jest.Mock).mockReturnValue({
     getEditor: async () => ({ getValue: () => 'SELECT 1' }),
@@ -127,4 +149,68 @@ test('SQL Lab export shows the row count and spreadsheet link', async () => {
     },
   );
   expect(core.toasts.removeToast).toHaveBeenCalledWith('pending-id');
+});
+
+test('dashboard registration uses its own capabilities and does not require chart capabilities', async () => {
+  fetchMock.mockImplementation(input =>
+    Promise.resolve(
+      ok({
+        can_export: String(input).endsWith('/dashboard/capabilities'),
+      }),
+    ),
+  );
+  const { commands, menus } = await loadExtension();
+  expect(commands.registerCommand).toHaveBeenCalledWith(
+    expect.objectContaining({ id: 'sqllab_gsheets.exportDashboard' }),
+    expect.any(Function),
+  );
+  expect(menus.registerMenuItem).toHaveBeenCalledWith(
+    { view: 'dashboard.download', command: 'sqllab_gsheets.exportDashboard' },
+    'dashboard.download',
+    'primary',
+  );
+  expect(menus.registerMenuItem).toHaveBeenCalledTimes(1);
+  expect(commands.registerCommand).toHaveBeenCalledTimes(1);
+});
+
+test('a failed dashboard capability request leaves the chart registrations intact', async () => {
+  fetchMock.mockImplementation(input =>
+    String(input).endsWith('/dashboard/capabilities')
+      ? Promise.reject(new TypeError('Network failed'))
+      : Promise.resolve(ok({ can_export: true })),
+  );
+  const warn = jest.spyOn(console, 'warn').mockImplementation();
+  try {
+    const { commands, menus } = await loadExtension();
+    expect(menus.registerMenuItem).toHaveBeenCalledTimes(8);
+    expect(commands.registerCommand).toHaveBeenCalledTimes(3);
+    expect(menus.registerMenuItem).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'dashboard.download',
+      expect.anything(),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      'Extension capability check failed',
+      '/dashboard/capabilities',
+      expect.any(TypeError),
+    );
+  } finally {
+    warn.mockRestore();
+  }
+});
+
+test('the dashboard command is registered before its menu item', async () => {
+  fetchMock.mockImplementation(input =>
+    Promise.resolve(
+      ok({
+        can_export: String(input).endsWith('/dashboard/capabilities'),
+      }),
+    ),
+  );
+  const { commands, menus } = await loadExtension();
+  expect(
+    (commands.registerCommand as jest.Mock).mock.invocationCallOrder[0],
+  ).toBeLessThan(
+    (menus.registerMenuItem as jest.Mock).mock.invocationCallOrder[0],
+  );
 });

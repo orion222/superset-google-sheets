@@ -29,6 +29,24 @@ declare module '@apache-superset/core' {
     canDownload: boolean;
   }
 
+  /** Argument passed to commands contributed to the dashboard download location. */
+  export interface DashboardDownloadContext {
+    /** Numeric id of the dashboard. */
+    dashboardId: number;
+    /** Title of the dashboard. */
+    dashboardTitle: string;
+    /** Currently applied native filters, keyed by filter id. */
+    activeDataMask: Record<
+      string,
+      {
+        extraFormData: object;
+        filterState: { value?: unknown; label?: string };
+      }
+    >;
+    /** Whether the current user may download this dashboard's data. */
+    canDownload: boolean;
+  }
+
   export namespace toasts {
     interface ToastOptions {
       link?: { href: string; label: string };

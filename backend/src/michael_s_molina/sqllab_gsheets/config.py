@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from typing import Any, TypeVar
 
 from flask import current_app
@@ -89,3 +90,25 @@ def sql_lab_max_rows() -> int:
     ):
         cap = min(cap, int(sql_max_row) - 1)
     return cap
+
+
+def background_tasks_enabled() -> bool:
+    """Resolve host task flags through its public configuration callbacks."""
+    flags = deepcopy(
+        {
+            **current_app.config.get("DEFAULT_FEATURE_FLAGS", {}),
+            **current_app.config.get("FEATURE_FLAGS", {}),
+        }
+    )
+    if flags.get("GLOBAL_ASYNC_QUERIES"):
+        flags["GLOBAL_TASK_FRAMEWORK"] = True
+    resolve = current_app.config.get("IS_FEATURE_ENABLED_FUNC")
+    if callable(resolve):
+        return bool(
+            resolve("GLOBAL_TASK_FRAMEWORK", flags.get("GLOBAL_TASK_FRAMEWORK", False))
+            or resolve("GLOBAL_ASYNC_QUERIES", flags.get("GLOBAL_ASYNC_QUERIES", False))
+        )
+    get_flags = current_app.config.get("GET_FEATURE_FLAGS_FUNC")
+    if callable(get_flags):
+        flags = get_flags(flags)
+    return bool(flags.get("GLOBAL_TASK_FRAMEWORK") or flags.get("GLOBAL_ASYNC_QUERIES"))

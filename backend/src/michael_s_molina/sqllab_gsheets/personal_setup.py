@@ -1,15 +1,22 @@
-"""One-off OAuth flow that prints GSHEETS_CREDENTIALS and a fresh export folder id."""
+"""Authorize Superset to export to a folder in the selected Google account."""
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import pprint
 import sys
+from pathlib import Path
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from .auth import USER_SCOPES
+
+
+def _open_private_file(path: str, flags: int) -> int:
+    return os.open(path, flags, mode=0o600)
 
 
 def main() -> None:
@@ -18,7 +25,18 @@ def main() -> None:
         "client_secret_json", help="OAuth desktop client JSON from Google Cloud"
     )
     parser.add_argument("--folder-name", default="Superset exports")
+    parser.add_argument(
+        "--config-output",
+        type=Path,
+        help="Write the Superset configuration to a new JSON file instead of stdout",
+    )
     args = parser.parse_args()
+    if args.config_output:
+        args.config_output = args.config_output.expanduser()
+        if args.config_output.exists():
+            parser.error("--config-output already exists")
+        if not args.config_output.parent.is_dir():
+            parser.error("--config-output parent directory does not exist")
 
     flow = InstalledAppFlow.from_client_secrets_file(
         args.client_secret_json,
@@ -51,6 +69,20 @@ def main() -> None:
         "client_secret": creds.client_secret,
         "refresh_token": creds.refresh_token,
     }
+    if args.config_output:
+        with open(
+            args.config_output, "x", encoding="utf-8", opener=_open_private_file
+        ) as output:
+            json.dump(
+                {
+                    "GSHEETS_CREDENTIALS": credentials,
+                    "GSHEETS_FOLDER_ID": folder["id"],
+                },
+                output,
+            )
+        print(f"Saved Google export configuration to {args.config_output}.")
+        return
+
     print(
         "WARNING: the output below is a secret; do not commit or share it.",
         file=sys.stderr,

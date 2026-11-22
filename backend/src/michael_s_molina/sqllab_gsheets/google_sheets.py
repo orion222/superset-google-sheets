@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import time
-from contextlib import closing
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -19,7 +20,7 @@ from .cells import CellValue
 from .config import credentials_info, export_timeout_seconds, folder_id
 from .errors import GENERIC_FAILURE
 from .google_http import GoogleHttp
-from .tabs import MAX_CELLS, Tab, check_cell_limit
+from .tabs import MAX_CELLS, Tab, check_cell_limit, grid_dimensions
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +208,8 @@ def _format_requests(tabs: list[Tab], sheet_ids: list[int]) -> list[dict[str, An
                 }
             }
         )
+        if len(tab.rows) <= 1:
+            continue
         for column in tab.temporal_columns:
             requests.append(
                 {
@@ -237,40 +240,89 @@ def _trash(drive: Any, file_id: str) -> None:
         logger.exception("Couldn't trash partial spreadsheet %s", file_id)
 
 
-def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
+def _structure_requests(tabs: list[Tab]) -> tuple[list[dict[str, Any]], list[int]]:
+    """Size each tab's grid to its data and assign sheet IDs before the first call."""
+    sheet_ids = list(range(len(tabs)))
+    structure: list[dict[str, Any]] = []
+    for tab, sheet_id in zip(tabs, sheet_ids):
+        row_count, column_count = grid_dimensions(tab.rows)
+        properties = {
+            "sheetId": sheet_id,
+            "title": tab.name,
+            "gridProperties": {
+                "frozenRowCount": int(len(tab.rows) > 1),
+                "rowCount": row_count,
+                "columnCount": column_count,
+            },
+        }
+        if sheet_id == DEFAULT_SHEET_ID:
+            # Reuse the initial grid so it never consumes extra cell budget
+            # or collides with a requested tab named Sheet1.
+            structure.append(
+                {
+                    "updateSheetProperties": {
+                        "properties": properties,
+                        "fields": "title,gridProperties",
+                    }
+                }
+            )
+        else:
+            structure.append({"addSheet": {"properties": properties}})
+    structure.extend(_format_requests(tabs, sheet_ids))
+    return structure, sheet_ids
+
+
+def _noop() -> None:
+    """Default checkpoint for synchronous exports."""
+
+
+def create_spreadsheet(
+    title: str,
+    tabs: list[Tab],
+    share_with: str,
+    *,
+    checkpoint: Callable[[], None] = _noop,
+) -> str:
+    """Write and share a sheet, cleaning up failures and cancellation signals.
+
+    Exceptions raised by ``checkpoint`` propagate unchanged; Google failures
+    become ``GoogleExportError``.
+    """
     info: dict[str, Any] | None = None
-    try:
+
+    @contextmanager
+    def google_call() -> Iterator[None]:
+        try:
+            yield
+        except Exception as ex:
+            logger.exception(
+                "Google Sheets export failed%s", auth.failure_hint(ex, info)
+            )
+            raise GoogleExportError() from ex
+
+    checkpoint()
+    with google_call():
         info = credentials_info()
-        credentials = auth.credentials(info)
-        with closing(GoogleHttp(credentials, timeout=export_timeout_seconds())) as http:
+        http = GoogleHttp(auth.credentials(info), timeout=export_timeout_seconds())
+    try:
+        with google_call():
             drive = build("drive", "v3", http=http, cache_discovery=False)
             sheets = build("sheets", "v4", http=http, cache_discovery=False)
-
             created_file = _create_file(drive, title, folder_id())
-            file_id = created_file.file_id
-            try:
-                sheet_ids = list(range(1, len(tabs) + 1))
-                structure: list[dict[str, Any]] = [
-                    {
-                        "addSheet": {
-                            "properties": {
-                                "sheetId": sheet_id,
-                                "title": tab.name,
-                                "gridProperties": {"frozenRowCount": 1},
-                            }
-                        }
-                    }
-                    for tab, sheet_id in zip(tabs, sheet_ids)
-                ]
-                structure.extend(_format_requests(tabs, sheet_ids))
-                structure.append({"deleteSheet": {"sheetId": DEFAULT_SHEET_ID}})
+        file_id = created_file.file_id
+        try:
+            checkpoint()
+            structure, _ = _structure_requests(tabs)
+            with google_call():
                 _execute(
                     sheets.spreadsheets().batchUpdate(
                         spreadsheetId=file_id, body={"requests": structure}
                     )
                 )
 
-                for data in _value_batches(tabs):
+            for data in _value_batches(tabs):
+                checkpoint()
+                with google_call():
                     _execute(
                         sheets.spreadsheets()
                         .values()
@@ -281,11 +333,15 @@ def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
                         retry_safe=True,
                     )
 
-                # A personal account already owns the file it created.
-                if not any(
-                    owner.casefold() == share_with.casefold()
-                    for owner in created_file.owner_emails
-                ):
+            # Google may send a share email as part of this call. Once sharing
+            # succeeds, finish even if the task has received a cancellation.
+            checkpoint()
+            # A personal account already owns the file it created.
+            if not any(
+                owner.casefold() == share_with.casefold()
+                for owner in created_file.owner_emails
+            ):
+                with google_call():
                     _execute(
                         drive.permissions().create(
                             fileId=file_id,
@@ -298,11 +354,13 @@ def create_spreadsheet(title: str, tabs: list[Tab], share_with: str) -> str:
                             sendNotificationEmail=True,
                         )
                     )
-            except Exception:
-                _trash(drive, file_id)
-                raise
-    except Exception as ex:
-        logger.exception("Google Sheets export failed%s", auth.failure_hint(ex, info))
-        raise GoogleExportError() from ex
+        except BaseException:
+            _trash(drive, file_id)
+            raise
+    finally:
+        try:
+            http.close()
+        except Exception:
+            logger.warning("Couldn't close the Google API session", exc_info=True)
 
     return f"https://docs.google.com/spreadsheets/d/{file_id}/edit"
